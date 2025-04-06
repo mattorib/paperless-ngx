@@ -137,10 +137,11 @@ ARG RUNTIME_PACKAGES="\
   # OCRmyPDF dependencies
   tesseract-ocr \
   tesseract-ocr-eng \
-  tesseract-ocr-deu \
-  tesseract-ocr-fra \
-  tesseract-ocr-ita \
-  tesseract-ocr-spa \
+  # tesseract-ocr-deu \
+  # tesseract-ocr-fra \
+  # tesseract-ocr-ita \
+  # tesseract-ocr-spa \
+  tesseract-ocr-jpn \
   unpaper \
   pngquant \
   jbig2dec \
