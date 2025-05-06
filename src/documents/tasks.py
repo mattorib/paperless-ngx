@@ -123,13 +123,14 @@ def train_classifier(*, scheduled=True):
             task.result = "Training data unchanged"
 
         task.status = states.SUCCESS
-        task.date_done = timezone.now()
-        task.save(update_fields=["status", "result", "date_done"])
 
     except Exception as e:
         logger.warning("Classifier error: " + str(e))
         task.status = states.FAILURE
         task.result = str(e)
+
+    task.date_done = timezone.now()
+    task.save(update_fields=["status", "result", "date_done"])
 
 
 @shared_task(bind=True)
@@ -461,6 +462,7 @@ def check_scheduled_workflows():
                             )
                             continue
                         run_workflows(
-                            WorkflowTrigger.WorkflowTriggerType.SCHEDULED,
-                            document,
+                            trigger_type=WorkflowTrigger.WorkflowTriggerType.SCHEDULED,
+                            workflow_to_run=workflow,
+                            document=document,
                         )

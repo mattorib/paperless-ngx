@@ -1,5 +1,5 @@
 import { AsyncPipe, NgTemplateOutlet } from '@angular/common'
-import { HttpClient } from '@angular/common/http'
+import { HttpClient, HttpResponse } from '@angular/common/http'
 import { Component, OnDestroy, OnInit, ViewChild } from '@angular/core'
 import {
   FormArray,
@@ -77,6 +77,7 @@ import { StoragePathService } from 'src/app/services/rest/storage-path.service'
 import { UserService } from 'src/app/services/rest/user.service'
 import { SettingsService } from 'src/app/services/settings.service'
 import { ToastService } from 'src/app/services/toast.service'
+import { getFilenameFromContentDisposition } from 'src/app/utils/http'
 import { ISODateAdapter } from 'src/app/utils/ngb-iso-date-adapter'
 import * as UTIF from 'utif'
 import { ConfirmDialogComponent } from '../common/confirm-dialog/confirm-dialog.component'
@@ -783,6 +784,7 @@ export class DocumentDetailComponent
           this.title = doc.title
           this.updateFormForCustomFields()
           this.documentForm.patchValue(doc)
+          this.documentForm.markAsPristine()
           this.openDocumentService.setDirty(doc, false)
         },
         error: () => {
@@ -793,11 +795,30 @@ export class DocumentDetailComponent
       })
   }
 
+  private getChangedFields(): any {
+    const changes = {
+      id: this.document.id,
+    }
+    Object.keys(this.documentForm.controls).forEach((key) => {
+      if (this.documentForm.get(key).dirty) {
+        if (key === 'permissions_form') {
+          changes['owner'] =
+            this.documentForm.get('permissions_form').value['owner']
+          changes['set_permissions'] =
+            this.documentForm.get('permissions_form').value['set_permissions']
+        } else {
+          changes[key] = this.documentForm.get(key).value
+        }
+      }
+    })
+    return changes
+  }
+
   save(close: boolean = false) {
     this.networkActive = true
     ;(document.activeElement as HTMLElement)?.dispatchEvent(new Event('change'))
     this.documentsService
-      .update(this.document)
+      .patch(this.getChangedFields())
       .pipe(first())
       .subscribe({
         next: (docValues) => {
@@ -851,7 +872,7 @@ export class DocumentDetailComponent
     this.networkActive = true
     this.store.next(this.documentForm.value)
     this.documentsService
-      .update(this.document)
+      .patch(this.getChangedFields())
       .pipe(
         switchMap((updateResult) => {
           return this.documentListViewService
@@ -995,44 +1016,46 @@ export class DocumentDetailComponent
       this.documentId,
       original
     )
-    this.http.get(downloadUrl, { responseType: 'blob' }).subscribe({
-      next: (blob) => {
-        this.downloading = false
-        const blobParts = [blob]
-        const file = new File(
-          blobParts,
-          original
-            ? this.document.original_file_name
-            : this.document.archived_file_name,
-          {
-            type: original ? this.document.mime_type : 'application/pdf',
-          }
-        )
-        if (
-          !this.deviceDetectorService.isDesktop() &&
-          navigator.canShare &&
-          navigator.canShare({ files: [file] })
-        ) {
-          navigator.share({
-            files: [file],
+    this.http
+      .get(downloadUrl, { observe: 'response', responseType: 'blob' })
+      .subscribe({
+        next: (response: HttpResponse<Blob>) => {
+          const contentDisposition = response.headers.get('Content-Disposition')
+          const filename =
+            getFilenameFromContentDisposition(contentDisposition) ||
+            this.document.title
+          const blob = new Blob([response.body], {
+            type: response.body.type,
           })
-        } else {
-          const url = URL.createObjectURL(blob)
-          const a = document.createElement('a')
-          a.href = url
-          a.download = this.document.title
-          a.click()
-          URL.revokeObjectURL(url)
-        }
-      },
-      error: (error) => {
-        this.downloading = false
-        this.toastService.showError(
-          $localize`Error downloading document`,
-          error
-        )
-      },
-    })
+          this.downloading = false
+          const file = new File([blob], filename, {
+            type: response.body.type,
+          })
+          if (
+            !this.deviceDetectorService.isDesktop() &&
+            navigator.canShare &&
+            navigator.canShare({ files: [file] })
+          ) {
+            navigator.share({
+              files: [file],
+            })
+          } else {
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement('a')
+            a.href = url
+            a.download = filename
+            a.click()
+            URL.revokeObjectURL(url)
+          }
+        },
+        error: (error) => {
+          this.downloading = false
+          this.toastService.showError(
+            $localize`Error downloading document`,
+            error
+          )
+        },
+      })
   }
 
   hasNext() {
@@ -1096,12 +1119,10 @@ export class DocumentDetailComponent
     )
   }
 
-  isZoomSelected(setting: ZoomSetting): boolean {
+  get currentZoom() {
     if (this.previewZoomScale === ZoomSetting.PageFit) {
-      return setting === ZoomSetting.PageFit
-    }
-
-    return this.previewZoomSetting === setting
+      return ZoomSetting.PageFit
+    } else return this.previewZoomSetting
   }
 
   getZoomSettingTitle(setting: ZoomSetting): string {
@@ -1302,6 +1323,8 @@ export class DocumentDetailComponent
       created: new Date(),
     })
     this.updateFormForCustomFields(true)
+    this.documentForm.get('custom_fields').markAsDirty()
+    this.documentForm.updateValueAndValidity()
   }
 
   public removeField(fieldInstance: CustomFieldInstance) {
@@ -1310,6 +1333,7 @@ export class DocumentDetailComponent
       1
     )
     this.updateFormForCustomFields(true)
+    this.documentForm.get('custom_fields').markAsDirty()
     this.documentForm.updateValueAndValidity()
   }
 
