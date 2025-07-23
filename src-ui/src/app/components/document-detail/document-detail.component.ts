@@ -1,6 +1,6 @@
 import { AsyncPipe, NgTemplateOutlet } from '@angular/common'
 import { HttpClient, HttpResponse } from '@angular/common/http'
-import { Component, OnDestroy, OnInit, ViewChild } from '@angular/core'
+import { Component, inject, OnDestroy, OnInit, ViewChild } from '@angular/core'
 import {
   FormArray,
   FormControl,
@@ -176,6 +176,26 @@ export class DocumentDetailComponent
   extends ComponentWithPermissions
   implements OnInit, OnDestroy, DirtyComponent
 {
+  private documentsService = inject(DocumentService)
+  private route = inject(ActivatedRoute)
+  private correspondentService = inject(CorrespondentService)
+  private documentTypeService = inject(DocumentTypeService)
+  private router = inject(Router)
+  private modalService = inject(NgbModal)
+  private openDocumentService = inject(OpenDocumentsService)
+  private documentListViewService = inject(DocumentListViewService)
+  private documentTitlePipe = inject(DocumentTitlePipe)
+  private toastService = inject(ToastService)
+  private settings = inject(SettingsService)
+  private storagePathService = inject(StoragePathService)
+  private permissionsService = inject(PermissionsService)
+  private userService = inject(UserService)
+  private customFieldsService = inject(CustomFieldsService)
+  private http = inject(HttpClient)
+  private hotKeyService = inject(HotKeyService)
+  private componentRouterService = inject(ComponentRouterService)
+  private deviceDetectorService = inject(DeviceDetectorService)
+
   @ViewChild('inputTitle')
   titleInput: TextComponent
 
@@ -208,7 +228,7 @@ export class DocumentDetailComponent
   documentForm: FormGroup = new FormGroup({
     title: new FormControl(''),
     content: new FormControl(''),
-    created_date: new FormControl(),
+    created: new FormControl(),
     correspondent: new FormControl(),
     document_type: new FormControl(),
     storage_path: new FormControl(),
@@ -258,30 +278,6 @@ export class DocumentDetailComponent
 
   DocumentDetailNavIDs = DocumentDetailNavIDs
   activeNavID: number
-
-  constructor(
-    private documentsService: DocumentService,
-    private route: ActivatedRoute,
-    private correspondentService: CorrespondentService,
-    private documentTypeService: DocumentTypeService,
-    private router: Router,
-    private modalService: NgbModal,
-    private openDocumentService: OpenDocumentsService,
-    private documentListViewService: DocumentListViewService,
-    private documentTitlePipe: DocumentTitlePipe,
-    private toastService: ToastService,
-    private settings: SettingsService,
-    private storagePathService: StoragePathService,
-    private permissionsService: PermissionsService,
-    private userService: UserService,
-    private customFieldsService: CustomFieldsService,
-    private http: HttpClient,
-    private hotKeyService: HotKeyService,
-    private componentRouterService: ComponentRouterService,
-    private deviceDetectorService: DeviceDetectorService
-  ) {
-    super()
-  }
 
   titleKeyUp(event) {
     this.titleSubject.next(event.target?.value)
@@ -490,7 +486,7 @@ export class DocumentDetailComponent
           this.store = new BehaviorSubject({
             title: doc.title,
             content: doc.content,
-            created_date: doc.created_date,
+            created: doc.created,
             correspondent: doc.correspondent,
             document_type: doc.document_type,
             storage_path: doc.storage_path,
@@ -698,6 +694,7 @@ export class DocumentDetailComponent
       .subscribe(({ newDocumentType, documentTypes }) => {
         this.documentTypes = documentTypes.results
         this.documentForm.get('document_type').setValue(newDocumentType.id)
+        this.documentForm.get('document_type').markAsDirty()
       })
   }
 
@@ -721,6 +718,7 @@ export class DocumentDetailComponent
       .subscribe(({ newCorrespondent, correspondents }) => {
         this.correspondents = correspondents.results
         this.documentForm.get('correspondent').setValue(newCorrespondent.id)
+        this.documentForm.get('correspondent').markAsDirty()
       })
   }
 
@@ -742,6 +740,7 @@ export class DocumentDetailComponent
       .subscribe(({ newStoragePath, storagePaths }) => {
         this.storagePaths = storagePaths.results
         this.documentForm.get('storage_path').setValue(newStoragePath.id)
+        this.documentForm.get('storage_path').markAsDirty()
       })
   }
 

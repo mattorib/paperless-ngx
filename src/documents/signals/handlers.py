@@ -13,6 +13,7 @@ from celery.signals import task_failure
 from celery.signals import task_postrun
 from celery.signals import task_prerun
 from django.conf import settings
+from django.contrib.auth.models import Group
 from django.contrib.auth.models import User
 from django.db import DatabaseError
 from django.db import close_old_connections
@@ -38,6 +39,7 @@ from documents.models import MatchingModel
 from documents.models import PaperlessTask
 from documents.models import SavedView
 from documents.models import Tag
+from documents.models import UiSettings
 from documents.models import Workflow
 from documents.models import WorkflowAction
 from documents.models import WorkflowRun
@@ -329,9 +331,8 @@ def cleanup_document_deletion(sender, instance, **kwargs):
             (old_filebase, old_fileext) = os.path.splitext(old_filename)
 
             while True:
-                new_file_path = os.path.join(
-                    settings.EMPTY_TRASH_DIR,
-                    old_filebase + (f"_{counter:02}" if counter else "") + old_fileext,
+                new_file_path = settings.EMPTY_TRASH_DIR / (
+                    old_filebase + (f"_{counter:02}" if counter else "") + old_fileext
                 )
 
                 if os.path.exists(new_file_path):
@@ -581,6 +582,51 @@ def cleanup_custom_field_deletion(sender, instance: CustomField, **kwargs):
         )
 
 
+@receiver(models.signals.post_delete, sender=User)
+@receiver(models.signals.post_delete, sender=Group)
+def cleanup_user_deletion(sender, instance: User | Group, **kwargs):
+    """
+    When a user or group is deleted, remove non-cascading references.
+    At the moment, just the default permission settings in UiSettings.
+    """
+    # Remove the user permission settings e.g.
+    #   DEFAULT_PERMS_OWNER: 'general-settings:permissions:default-owner',
+    #   DEFAULT_PERMS_VIEW_USERS: 'general-settings:permissions:default-view-users',
+    #   DEFAULT_PERMS_VIEW_GROUPS: 'general-settings:permissions:default-view-groups',
+    #   DEFAULT_PERMS_EDIT_USERS: 'general-settings:permissions:default-edit-users',
+    #   DEFAULT_PERMS_EDIT_GROUPS: 'general-settings:permissions:default-edit-groups',
+    for ui_settings in UiSettings.objects.all():
+        try:
+            permissions = ui_settings.settings.get("permissions", {})
+            updated = False
+            if isinstance(instance, User):
+                if permissions.get("default_owner") == instance.pk:
+                    permissions["default_owner"] = None
+                    updated = True
+                if instance.pk in permissions.get("default_view_users", []):
+                    permissions["default_view_users"].remove(instance.pk)
+                    updated = True
+                if instance.pk in permissions.get("default_change_users", []):
+                    permissions["default_change_users"].remove(instance.pk)
+                    updated = True
+            elif isinstance(instance, Group):
+                if instance.pk in permissions.get("default_view_groups", []):
+                    permissions["default_view_groups"].remove(instance.pk)
+                    updated = True
+                if instance.pk in permissions.get("default_change_groups", []):
+                    permissions["default_change_groups"].remove(instance.pk)
+                    updated = True
+            if updated:
+                ui_settings.settings["permissions"] = permissions
+                ui_settings.save(update_fields=["settings"])
+        except Exception as e:
+            logger.error(
+                f"Error while cleaning up user {instance.pk} ({instance.username}) from ui_settings: {e}"
+                if isinstance(instance, User)
+                else f"Error while cleaning up group {instance.pk} ({instance.name}) from ui_settings: {e}",
+            )
+
+
 def add_to_index(sender, document, **kwargs):
     from documents import index
 
@@ -722,7 +768,7 @@ def run_workflows(
                         timezone.localtime(document.added),
                         document.original_filename or "",
                         document.filename or "",
-                        timezone.localtime(document.created),
+                        document.created,
                     )
                 except Exception:
                     logger.exception(
@@ -974,7 +1020,7 @@ def run_workflows(
 
         if action.remove_all_custom_fields:
             if not use_overrides:
-                CustomFieldInstance.objects.filter(document=document).delete()
+                CustomFieldInstance.objects.filter(document=document).hard_delete()
             else:
                 overrides.custom_fields = None
         elif action.remove_custom_fields.exists():
@@ -982,7 +1028,7 @@ def run_workflows(
                 CustomFieldInstance.objects.filter(
                     field__in=action.remove_custom_fields.all(),
                     document=document,
-                ).delete()
+                ).hard_delete()
             elif overrides.custom_fields:
                 for field in action.remove_custom_fields.filter(
                     pk__in=overrides.custom_fields.keys(),
@@ -1010,7 +1056,7 @@ def run_workflows(
             filename = document.original_filename or ""
             current_filename = document.filename or ""
             added = timezone.localtime(document.added)
-            created = timezone.localtime(document.created)
+            created = document.created
         else:
             title = overrides.title if overrides.title else str(document.original_file)
             doc_url = ""
@@ -1032,7 +1078,7 @@ def run_workflows(
             filename = document.original_file if document.original_file else ""
             current_filename = filename
             added = timezone.localtime(timezone.now())
-            created = timezone.localtime(overrides.created)
+            created = overrides.created
 
         subject = (
             parse_w_workflow_placeholders(
@@ -1098,7 +1144,7 @@ def run_workflows(
             filename = document.original_filename or ""
             current_filename = document.filename or ""
             added = timezone.localtime(document.added)
-            created = timezone.localtime(document.created)
+            created = document.created
         else:
             title = overrides.title if overrides.title else str(document.original_file)
             doc_url = ""
@@ -1120,7 +1166,7 @@ def run_workflows(
             filename = document.original_file if document.original_file else ""
             current_filename = filename
             added = timezone.localtime(timezone.now())
-            created = timezone.localtime(overrides.created)
+            created = overrides.created
 
         try:
             data = {}

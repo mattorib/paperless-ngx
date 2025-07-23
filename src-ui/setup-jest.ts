@@ -20,6 +20,7 @@ import localeDe from '@angular/common/locales/de'
 import localeEl from '@angular/common/locales/el'
 import localeEnGb from '@angular/common/locales/en-GB'
 import localeEs from '@angular/common/locales/es'
+import localeFa from '@angular/common/locales/fa'
 import localeFi from '@angular/common/locales/fi'
 import localeFr from '@angular/common/locales/fr'
 import localeHu from '@angular/common/locales/hu'
@@ -39,6 +40,7 @@ import localeSr from '@angular/common/locales/sr'
 import localeSv from '@angular/common/locales/sv'
 import localeTr from '@angular/common/locales/tr'
 import localeUk from '@angular/common/locales/uk'
+import localeVi from '@angular/common/locales/vi'
 import localeZh from '@angular/common/locales/zh'
 import localeZhHant from '@angular/common/locales/zh-Hant'
 
@@ -53,6 +55,7 @@ registerLocaleData(localeDe)
 registerLocaleData(localeEl)
 registerLocaleData(localeEnGb)
 registerLocaleData(localeEs)
+registerLocaleData(localeFa)
 registerLocaleData(localeFi)
 registerLocaleData(localeFr)
 registerLocaleData(localeHu)
@@ -73,6 +76,7 @@ registerLocaleData(localeSr)
 registerLocaleData(localeSv)
 registerLocaleData(localeTr)
 registerLocaleData(localeUk)
+registerLocaleData(localeVi)
 registerLocaleData(localeZh)
 registerLocaleData(localeZhHant)
 
@@ -121,19 +125,4 @@ HTMLCanvasElement.prototype.getContext = <
   typeof HTMLCanvasElement.prototype.getContext
 >jest.fn()
 
-// pdfjs
-jest.mock('pdfjs-dist', () => ({
-  getDocument: jest.fn(() => ({
-    promise: Promise.resolve({ numPages: 3 }),
-  })),
-  GlobalWorkerOptions: { workerSrc: '' },
-  VerbosityLevel: { ERRORS: 0 },
-  globalThis: {
-    pdfjsLib: {
-      GlobalWorkerOptions: {
-        workerSrc: '',
-      },
-    },
-  },
-}))
-jest.mock('pdfjs-dist/web/pdf_viewer', () => ({}))
+jest.mock('pdfjs-dist')

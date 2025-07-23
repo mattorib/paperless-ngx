@@ -115,7 +115,8 @@ following operations on your documents:
 
     No matter which options you choose, Paperless will always store the
     original document that it found in the consumption directory or in the
-    mail and will never overwrite that document. Archived versions are
+    mail and will never overwrite that document (except when using certain
+    document actions, which make that clear). Archived versions are
     stored alongside the original versions. Any files found in the
     consumption directory will stored inside the Paperless-ngx file
     structure and will not be retained in the consumption directory.
@@ -337,25 +338,25 @@ Global permissions define what areas of the app and API endpoints users can acce
 determine if a user can create, edit, delete or view _any_ documents, but individual documents themselves
 still have "object-level" permissions.
 
-| Type          | Details                                                                                                                                                                  |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| AppConfig     | _Change_ or higher permissions grants access to the "Application Configuration" area.                                                                                    |
-| Correspondent | Add, edit, delete or view Correspondents.                                                                                                                                |
-| CustomField   | Add, edit, delete or view Custom Fields.                                                                                                                                 |
-| Document      | Add, edit, delete or view Documents.                                                                                                                                     |
-| DocumentType  | Add, edit, delete or view Document Types.                                                                                                                                |
-| Group         | Add, edit, delete or view Groups.                                                                                                                                        |
-| MailAccount   | Add, edit, delete or view Mail Accounts.                                                                                                                                 |
-| MailRule      | Add, edit, delete or view Mail Rules.                                                                                                                                    |
-| Note          | Add, edit, delete or view Notes.                                                                                                                                         |
-| PaperlessTask | View or dismiss (_Change_) File Tasks.                                                                                                                                   |
-| SavedView     | Add, edit, delete or view Saved Views.                                                                                                                                   |
-| ShareLink     | Add, delete or view Share Links.                                                                                                                                         |
-| StoragePath   | Add, edit, delete or view Storage Paths.                                                                                                                                 |
-| Tag           | Add, edit, delete or view Tags.                                                                                                                                          |
-| UISettings    | Add, edit, delete or view the UI settings that are used by the web app.<br/>:warning: **Users that will access the web UI must be granted at least _View_ permissions.** |
-| User          | Add, edit, delete or view Users.                                                                                                                                         |
-| Workflow      | Add, edit, delete or view Workflows.<br/>Note that Workflows are global, in other words all users who can access workflows have access to the same set of them.          |
+| Type          | Details                                                                                                                                                                                                                         |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AppConfig     | _Change_ or higher permissions grants access to the "Application Configuration" area.                                                                                                                                           |
+| Correspondent | Add, edit, delete or view Correspondents.                                                                                                                                                                                       |
+| CustomField   | Add, edit, delete or view Custom Fields.                                                                                                                                                                                        |
+| Document      | Add, edit, delete or view Documents.                                                                                                                                                                                            |
+| DocumentType  | Add, edit, delete or view Document Types.                                                                                                                                                                                       |
+| Group         | Add, edit, delete or view Groups.                                                                                                                                                                                               |
+| MailAccount   | Add, edit, delete or view Mail Accounts.                                                                                                                                                                                        |
+| MailRule      | Add, edit, delete or view Mail Rules.                                                                                                                                                                                           |
+| Note          | Add, edit, delete or view Notes.                                                                                                                                                                                                |
+| PaperlessTask | View or dismiss (_Change_) File Tasks.                                                                                                                                                                                          |
+| SavedView     | Add, edit, delete or view Saved Views.                                                                                                                                                                                          |
+| ShareLink     | Add, delete or view Share Links.                                                                                                                                                                                                |
+| StoragePath   | Add, edit, delete or view Storage Paths.                                                                                                                                                                                        |
+| Tag           | Add, edit, delete or view Tags.                                                                                                                                                                                                 |
+| UISettings    | Add, edit, delete or view the UI settings that are used by the web app.<br/>:warning: **Users that will access the web UI must be granted at least _View_ permissions.**                                                        |
+| User          | Add, edit, delete or view Users.                                                                                                                                                                                                |
+| Workflow      | Add, edit, delete or view Workflows.<br/>Note that Workflows are global; all users who can access workflows see the same set. Workflows have other permission implications — see [Workflow permissions](#workflow-permissions). |
 
 #### Detailed Explanation of Object Permissions {#object-permissions}
 
@@ -406,7 +407,8 @@ Currently, there are three events that correspond to workflow trigger 'types':
 3. **Document Updated**: when a document is updated. Similar to 'added' events, triggers can include filtering by content matching,
    tags, doc type, or correspondent.
 4. **Scheduled**: a scheduled trigger that can be used to run workflows at a specific time. The date used can be either the document
-   added, created, updated date or you can specify a (date) custom field. You can also specify a day offset from the date.
+   added, created, updated date or you can specify a (date) custom field. You can also specify a day offset from the date (positive
+   offsets will trigger after the date, negative offsets will trigger before).
 
 The following flow diagram illustrates the three document trigger types:
 
@@ -531,7 +533,7 @@ The following placeholders are only available for "added" or "updated" triggers
 All users who have application permissions for editing workflows can see the same set
 of workflows. In other words, workflows themselves intentionally do not have an owner or permissions.
 
-Given their potentially far-reaching capabilities, you may want to restrict access to workflows.
+Given their potentially far-reaching capabilities, including changing the permissions of existing documents, you may want to restrict access to workflows.
 
 Upon migration, existing installs will grant access to workflows to users who can add
 documents (and superusers who can always access all parts of the app).

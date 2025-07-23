@@ -132,7 +132,7 @@ use cases:
 
 5. Documents with a custom field "address" (text) that is empty:
 
-    `?custom_field_query=["OR", ["address", "isnull", true], ["address", "exact", ""]]`
+    `?custom_field_query=["OR", [["address", "isnull", true], ["address", "exact", ""]]]`
 
 6. Documents that don't have a field called "foo":
 
@@ -418,3 +418,9 @@ Initial API version.
 
 -   The user field of document notes now returns a simplified user object
     rather than just the user ID.
+
+#### Version 9
+
+-   The document `created` field is now a date, not a datetime. The
+    `created_date` field is considered deprecated and will be removed in a
+    future version.

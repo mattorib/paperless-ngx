@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import datetime
 import logging
 import math
 import re
-import zoneinfo
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -19,9 +18,14 @@ from django.core.validators import MaxLengthValidator
 from django.core.validators import RegexValidator
 from django.core.validators import integer_validator
 from django.utils.crypto import get_random_string
+from django.utils.dateparse import parse_datetime
 from django.utils.text import slugify
+from django.utils.timezone import get_current_timezone
+from django.utils.timezone import is_naive
+from django.utils.timezone import make_aware
 from django.utils.translation import gettext as _
 from drf_spectacular.utils import extend_schema_field
+from drf_spectacular.utils import extend_schema_serializer
 from drf_writable_nested.serializers import NestedUpdateMixin
 from guardian.core import ObjectPermissionChecker
 from guardian.shortcuts import get_users_with_perms
@@ -360,9 +364,9 @@ class OwnedObjectSerializer(
             shared_object_pks = self.get_shared_object_pks([obj])
         return obj.owner == self.user and obj.id in shared_object_pks
 
-    permissions = SerializerMethodField(read_only=True)
-    user_can_change = SerializerMethodField(read_only=True)
-    is_shared_by_requester = SerializerMethodField(read_only=True)
+    permissions = SerializerMethodField(read_only=True, required=False)
+    user_can_change = SerializerMethodField(read_only=True, required=False)
+    is_shared_by_requester = SerializerMethodField(read_only=True, required=False)
 
     set_permissions = SetPermissionsSerializer(
         label="Set permissions",
@@ -423,7 +427,7 @@ class OwnedObjectListSerializer(serializers.ListSerializer):
 
 
 class CorrespondentSerializer(MatchingModelSerializer, OwnedObjectSerializer):
-    last_correspondence = serializers.DateTimeField(read_only=True, required=False)
+    last_correspondence = serializers.DateField(read_only=True, required=False)
 
     class Meta:
         model = Correspondent
@@ -892,6 +896,9 @@ class NotesSerializer(serializers.ModelSerializer):
         return ret
 
 
+@extend_schema_serializer(
+    deprecate_fields=["created_date"],
+)
 class DocumentSerializer(
     OwnedObjectSerializer,
     NestedUpdateMixin,
@@ -944,7 +951,37 @@ class DocumentSerializer(
         doc = super().to_representation(instance)
         if self.truncate_content and "content" in self.fields:
             doc["content"] = doc.get("content")[0:550]
+
+        request = self.context.get("request")
+        api_version = int(
+            request.version if request else settings.REST_FRAMEWORK["DEFAULT_VERSION"],
+        )
+
+        if api_version < 9:
+            # provide created as a datetime for backwards compatibility
+            from django.utils import timezone
+
+            doc["created"] = timezone.make_aware(
+                datetime.combine(
+                    instance.created,
+                    datetime.min.time(),
+                ),
+            ).isoformat()
         return doc
+
+    def to_internal_value(self, data):
+        if (
+            "created" in data
+            and isinstance(data["created"], str)
+            and ":" in data["created"]
+        ):
+            # Handle old format of isoformat datetime string
+            parsed = parse_datetime(data["created"])
+            if parsed:
+                if is_naive(parsed):
+                    parsed = make_aware(parsed, get_current_timezone())
+                data["created"] = parsed.astimezone().date()
+        return super().to_internal_value(data)
 
     def validate(self, attrs):
         if (
@@ -966,13 +1003,12 @@ class DocumentSerializer(
 
     def update(self, instance: Document, validated_data):
         if "created_date" in validated_data and "created" not in validated_data:
-            new_datetime = datetime.datetime.combine(
-                validated_data.get("created_date"),
-                datetime.time(0, 0, 0, 0, zoneinfo.ZoneInfo(settings.TIME_ZONE)),
-            )
-            instance.created = new_datetime
+            instance.created = validated_data.get("created_date")
             instance.save()
         if "created_date" in validated_data:
+            logger.warning(
+                "created_date is deprecated, use created instead",
+            )
             validated_data.pop("created_date")
         if instance.custom_fields.count() > 0 and "custom_fields" in validated_data:
             incoming_custom_fields = [
@@ -1157,7 +1193,6 @@ class SavedViewSerializer(OwnedObjectSerializer):
             "owner",
             "permissions",
             "user_can_change",
-            "set_permissions",
         ]
 
     def validate(self, attrs):
@@ -1646,6 +1681,11 @@ class PostDocumentSerializer(serializers.Serializer):
         else:
             return None
 
+    def validate_created(self, created):
+        # support datetime format for created for backwards compatibility
+        if isinstance(created, datetime):
+            return created.date()
+
 
 class BulkDownloadSerializer(DocumentListSerializer):
     content = serializers.ChoiceField(
@@ -1710,13 +1750,15 @@ class StoragePathSerializer(MatchingModelSerializer, OwnedObjectSerializer):
         using it require a rename/move
         """
         doc_ids = [doc.id for doc in instance.documents.all()]
-        if len(doc_ids):
+        if doc_ids:
             bulk_edit.bulk_update_documents.delay(doc_ids)
 
         return super().update(instance, validated_data)
 
 
 class UiSettingsViewSerializer(serializers.ModelSerializer):
+    settings = serializers.DictField(required=False, allow_null=True)
+
     class Meta:
         model = UiSettings
         depth = 1
@@ -1983,8 +2025,9 @@ class WorkflowTriggerSerializer(serializers.ModelSerializer):
         ):
             attrs["filter_path"] = None
 
+        trigger_type = attrs.get("type", getattr(self.instance, "type", None))
         if (
-            attrs["type"] == WorkflowTrigger.WorkflowTriggerType.CONSUMPTION
+            trigger_type == WorkflowTrigger.WorkflowTriggerType.CONSUMPTION
             and "filter_mailrule" not in attrs
             and ("filter_filename" not in attrs or attrs["filter_filename"] is None)
             and ("filter_path" not in attrs or attrs["filter_path"] is None)
@@ -2156,7 +2199,7 @@ class WorkflowSerializer(serializers.ModelSerializer):
         set_triggers = []
         set_actions = []
 
-        if triggers is not None:
+        if triggers is not None and triggers is not serializers.empty:
             for trigger in triggers:
                 filter_has_tags = trigger.pop("filter_has_tags", None)
                 trigger_instance, _ = WorkflowTrigger.objects.update_or_create(
@@ -2167,7 +2210,7 @@ class WorkflowSerializer(serializers.ModelSerializer):
                     trigger_instance.filter_has_tags.set(filter_has_tags)
                 set_triggers.append(trigger_instance)
 
-        if actions is not None:
+        if actions is not None and actions is not serializers.empty:
             for action in actions:
                 assign_tags = action.pop("assign_tags", None)
                 assign_view_users = action.pop("assign_view_users", None)
@@ -2249,14 +2292,16 @@ class WorkflowSerializer(serializers.ModelSerializer):
 
                 set_actions.append(action_instance)
 
-        instance.triggers.set(set_triggers)
-        instance.actions.set(set_actions)
+        if triggers is not serializers.empty:
+            instance.triggers.set(set_triggers)
+        if actions is not serializers.empty:
+            instance.actions.set(set_actions)
         instance.save()
 
     def prune_triggers_and_actions(self):
         """
         ManyToMany fields dont support e.g. on_delete so we need to discard unattached
-        triggers and actionas manually
+        triggers and actions manually
         """
         for trigger in WorkflowTrigger.objects.all():
             if trigger.workflows.all().count() == 0:
@@ -2283,16 +2328,12 @@ class WorkflowSerializer(serializers.ModelSerializer):
         return instance
 
     def update(self, instance: Workflow, validated_data) -> Workflow:
-        if "triggers" in validated_data:
-            triggers = validated_data.pop("triggers")
-
-        if "actions" in validated_data:
-            actions = validated_data.pop("actions")
+        triggers = validated_data.pop("triggers", serializers.empty)
+        actions = validated_data.pop("actions", serializers.empty)
 
         instance = super().update(instance, validated_data)
 
         self.update_triggers_and_actions(instance, triggers, actions)
-
         self.prune_triggers_and_actions()
 
         return instance

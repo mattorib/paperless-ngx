@@ -5,6 +5,7 @@ import math
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime
+from datetime import time
 from datetime import timezone
 from shutil import rmtree
 from typing import TYPE_CHECKING
@@ -168,7 +169,7 @@ def update_document(writer: AsyncWriter, doc: Document) -> None:
         type=doc.document_type.name if doc.document_type else None,
         type_id=doc.document_type.id if doc.document_type else None,
         has_type=doc.document_type is not None,
-        created=doc.created,
+        created=datetime.combine(doc.created, time.min),
         added=doc.added,
         asn=asn,
         modified=doc.modified,
@@ -280,6 +281,7 @@ class DelayedQuery:
         self.saved_results = dict()
         self.first_score = None
         self.filter_queryset = filter_queryset
+        self.suggested_correction = None
 
     def __len__(self) -> int:
         page = self[0:1]
@@ -289,7 +291,8 @@ class DelayedQuery:
         if item.start in self.saved_results:
             return self.saved_results[item.start]
 
-        q, mask = self._get_query()
+        q, mask, suggested_correction = self._get_query()
+        self.suggested_correction = suggested_correction
         sortedby, reverse = self._get_query_sortedby()
 
         page: ResultsPage = self.searcher.search_page(
@@ -360,12 +363,19 @@ class DelayedFullTextQuery(DelayedQuery):
             ),
         )
         q = qp.parse(q_str)
+        suggested_correction = None
+        try:
+            corrected = self.searcher.correct_query(q, q_str)
+            if corrected.string != q_str:
+                suggested_correction = corrected.string
+        except Exception as e:
+            logger.info(
+                "Error while correcting query %s: %s",
+                f"{q_str!r}",
+                e,
+            )
 
-        corrected = self.searcher.correct_query(q, q_str)
-        if corrected.query != q:
-            corrected.query = corrected.string
-
-        return q, None
+        return q, None, suggested_correction
 
 
 class DelayedMoreLikeThisQuery(DelayedQuery):
@@ -386,7 +396,7 @@ class DelayedMoreLikeThisQuery(DelayedQuery):
         )
         mask: set = {docnum}
 
-        return q, mask
+        return q, mask, None
 
 
 def autocomplete(

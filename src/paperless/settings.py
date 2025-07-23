@@ -1,5 +1,7 @@
 import datetime
 import json
+import logging
+import logging.config
 import math
 import multiprocessing
 import os
@@ -11,20 +13,24 @@ from typing import Final
 from urllib.parse import urlparse
 
 from celery.schedules import crontab
-from concurrent_log_handler.queue import setup_logging_queues
+from dateparser.languages.loader import LocaleDataLoader
 from django.utils.translation import gettext_lazy as _
 from dotenv import load_dotenv
 
+from paperless.utils import ocr_to_dateparser_languages
+
+logger = logging.getLogger("paperless.settings")
+
 # Tap paperless.conf if it's available
-configuration_path = os.getenv("PAPERLESS_CONFIGURATION_PATH")
-if configuration_path and os.path.exists(configuration_path):
-    load_dotenv(configuration_path)
-elif os.path.exists("../paperless.conf"):
-    load_dotenv("../paperless.conf")
-elif os.path.exists("/etc/paperless.conf"):
-    load_dotenv("/etc/paperless.conf")
-elif os.path.exists("/usr/local/etc/paperless.conf"):
-    load_dotenv("/usr/local/etc/paperless.conf")
+for path in [
+    os.getenv("PAPERLESS_CONFIGURATION_PATH"),
+    "../paperless.conf",
+    "/etc/paperless.conf",
+    "/usr/local/etc/paperless.conf",
+]:
+    if path and Path(path).exists():
+        load_dotenv(path)
+        break
 
 # There are multiple levels of concurrency in paperless:
 #  - Multiple consumers may be run in parallel.
@@ -270,9 +276,10 @@ DATA_DIR = __get_path("PAPERLESS_DATA_DIR", BASE_DIR.parent / "data")
 NLTK_DIR = __get_path("PAPERLESS_NLTK_DIR", "/usr/share/nltk_data")
 
 # Check deprecated setting first
-EMPTY_TRASH_DIR = os.getenv(
-    "PAPERLESS_TRASH_DIR",
-    os.getenv("PAPERLESS_EMPTY_TRASH_DIR"),
+EMPTY_TRASH_DIR = (
+    __get_path("PAPERLESS_TRASH_DIR", os.getenv("PAPERLESS_EMPTY_TRASH_DIR"))
+    if os.getenv("PAPERLESS_TRASH_DIR") or os.getenv("PAPERLESS_EMPTY_TRASH_DIR")
+    else None
 )
 
 # Lock file for synchronizing changes to the MEDIA directory across multiple
@@ -342,10 +349,10 @@ REST_FRAMEWORK = {
         "rest_framework.authentication.SessionAuthentication",
     ],
     "DEFAULT_VERSIONING_CLASS": "rest_framework.versioning.AcceptHeaderVersioning",
-    "DEFAULT_VERSION": "8",  # match src-ui/src/environments/environment.prod.ts
+    "DEFAULT_VERSION": "9",  # match src-ui/src/environments/environment.prod.ts
     # Make sure these are ordered and that the most recent version appears
     # last. See api.md#api-versioning when adding new versions.
-    "ALLOWED_VERSIONS": ["1", "2", "3", "4", "5", "6", "7", "8"],
+    "ALLOWED_VERSIONS": ["1", "2", "3", "4", "5", "6", "7", "8", "9"],
     # DRF Spectacular default schema
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
 }
@@ -432,6 +439,7 @@ STORAGES = {
 _CELERY_REDIS_URL, _CHANNELS_REDIS_URL = _parse_redis_url(
     os.getenv("PAPERLESS_REDIS", None),
 )
+_REDIS_KEY_PREFIX = os.getenv("PAPERLESS_REDIS_PREFIX", "")
 
 TEMPLATES = [
     {
@@ -457,10 +465,28 @@ CHANNEL_LAYERS = {
             "hosts": [_CHANNELS_REDIS_URL],
             "capacity": 2000,  # default 100
             "expiry": 15,  # default 60
-            "prefix": os.getenv("PAPERLESS_REDIS_PREFIX", ""),
+            "prefix": _REDIS_KEY_PREFIX,
         },
     },
 }
+
+###############################################################################
+# Email (SMTP) Backend                                                        #
+###############################################################################
+
+EMAIL_HOST: Final[str] = os.getenv("PAPERLESS_EMAIL_HOST", "localhost")
+EMAIL_PORT: Final[int] = int(os.getenv("PAPERLESS_EMAIL_PORT", 25))
+EMAIL_HOST_USER: Final[str] = os.getenv("PAPERLESS_EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD: Final[str] = os.getenv("PAPERLESS_EMAIL_HOST_PASSWORD", "")
+DEFAULT_FROM_EMAIL: Final[str] = os.getenv("PAPERLESS_EMAIL_FROM", EMAIL_HOST_USER)
+EMAIL_USE_TLS: Final[bool] = __get_boolean("PAPERLESS_EMAIL_USE_TLS")
+EMAIL_USE_SSL: Final[bool] = __get_boolean("PAPERLESS_EMAIL_USE_SSL")
+EMAIL_SUBJECT_PREFIX: Final[str] = "[Paperless-ngx] "
+EMAIL_TIMEOUT = 30.0
+EMAIL_ENABLED = EMAIL_HOST != "localhost" or EMAIL_HOST_USER != ""
+if DEBUG:  # pragma: no cover
+    EMAIL_BACKEND = "django.core.mail.backends.filebased.EmailBackend"
+    EMAIL_FILE_PATH = BASE_DIR / "sent_emails"
 
 ###############################################################################
 # Security                                                                    #
@@ -503,9 +529,13 @@ REDIRECT_LOGIN_TO_SSO = __get_boolean("PAPERLESS_REDIRECT_LOGIN_TO_SSO")
 
 AUTO_LOGIN_USERNAME = os.getenv("PAPERLESS_AUTO_LOGIN_USERNAME")
 
-ACCOUNT_EMAIL_VERIFICATION = os.getenv(
-    "PAPERLESS_ACCOUNT_EMAIL_VERIFICATION",
-    "optional",
+ACCOUNT_EMAIL_VERIFICATION = (
+    "none"
+    if not EMAIL_ENABLED
+    else os.getenv(
+        "PAPERLESS_ACCOUNT_EMAIL_VERIFICATION",
+        "optional",
+    )
 )
 
 ACCOUNT_EMAIL_UNKNOWN_ACCOUNTS = __get_boolean(
@@ -651,7 +681,7 @@ def _parse_db_settings() -> dict:
     databases = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
-            "NAME": os.path.join(DATA_DIR, "db.sqlite3"),
+            "NAME": str(DATA_DIR / "db.sqlite3"),
             "OPTIONS": {},
         },
     }
@@ -741,6 +771,7 @@ LANGUAGES = [
     ("el-gr", _("Greek")),
     ("en-gb", _("English (GB)")),
     ("es-es", _("Spanish")),
+    ("fa-ir", _("Persian")),
     ("fi-fi", _("Finnish")),
     ("fr-fr", _("French")),
     ("hu-hu", _("Hungarian")),
@@ -761,11 +792,12 @@ LANGUAGES = [
     ("sv-se", _("Swedish")),
     ("tr-tr", _("Turkish")),
     ("uk-ua", _("Ukrainian")),
+    ("vi-vn", _("Vietnamese")),
     ("zh-cn", _("Chinese Simplified")),
     ("zh-tw", _("Chinese Traditional")),
 ]
 
-LOCALE_PATHS = [os.path.join(BASE_DIR, "locale")]
+LOCALE_PATHS = [str(BASE_DIR / "locale")]
 
 TIME_ZONE = os.getenv("PAPERLESS_TIME_ZONE", "UTC")
 
@@ -778,8 +810,6 @@ USE_TZ = True
 ###############################################################################
 # Logging                                                                     #
 ###############################################################################
-
-setup_logging_queues()
 
 LOGGING_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -808,21 +838,21 @@ LOGGING = {
         "file_paperless": {
             "class": "concurrent_log_handler.ConcurrentRotatingFileHandler",
             "formatter": "verbose",
-            "filename": os.path.join(LOGGING_DIR, "paperless.log"),
+            "filename": str(LOGGING_DIR / "paperless.log"),
             "maxBytes": LOGROTATE_MAX_SIZE,
             "backupCount": LOGROTATE_MAX_BACKUPS,
         },
         "file_mail": {
             "class": "concurrent_log_handler.ConcurrentRotatingFileHandler",
             "formatter": "verbose",
-            "filename": os.path.join(LOGGING_DIR, "mail.log"),
+            "filename": str(LOGGING_DIR / "mail.log"),
             "maxBytes": LOGROTATE_MAX_SIZE,
             "backupCount": LOGROTATE_MAX_BACKUPS,
         },
         "file_celery": {
             "class": "concurrent_log_handler.ConcurrentRotatingFileHandler",
             "formatter": "verbose",
-            "filename": os.path.join(LOGGING_DIR, "celery.log"),
+            "filename": str(LOGGING_DIR / "celery.log"),
             "maxBytes": LOGROTATE_MAX_SIZE,
             "backupCount": LOGROTATE_MAX_BACKUPS,
         },
@@ -838,6 +868,10 @@ LOGGING = {
         "granian.access": {"handlers": ["file_paperless"], "level": "DEBUG"},
     },
 }
+
+# Configure logging before calling any logger in settings.py so it will respect the log format, even if Django has not parsed the settings yet.
+logging.config.dictConfig(LOGGING)
+
 
 ###############################################################################
 # Task queue                                                                  #
@@ -858,7 +892,7 @@ CELERY_SEND_TASK_SENT_EVENT = True
 CELERY_BROKER_CONNECTION_RETRY = True
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 CELERY_BROKER_TRANSPORT_OPTIONS = {
-    "global_keyprefix": os.getenv("PAPERLESS_REDIS_PREFIX", ""),
+    "global_keyprefix": _REDIS_KEY_PREFIX,
 }
 
 CELERY_TASK_TRACK_STARTED = True
@@ -877,24 +911,67 @@ CELERY_ACCEPT_CONTENT = ["application/json", "application/x-python-serialize"]
 CELERY_BEAT_SCHEDULE = _parse_beat_schedule()
 
 # https://docs.celeryq.dev/en/stable/userguide/configuration.html#beat-schedule-filename
-CELERY_BEAT_SCHEDULE_FILENAME = os.path.join(DATA_DIR, "celerybeat-schedule.db")
+CELERY_BEAT_SCHEDULE_FILENAME = str(DATA_DIR / "celerybeat-schedule.db")
 
-# django setting.
-CACHES = {
-    "default": {
-        "BACKEND": os.environ.get(
-            "PAPERLESS_CACHE_BACKEND",
-            "django.core.cache.backends.redis.RedisCache",
-        ),
-        "LOCATION": _CHANNELS_REDIS_URL,
-        "KEY_PREFIX": os.getenv("PAPERLESS_REDIS_PREFIX", ""),
-    },
-}
 
-if DEBUG and os.getenv("PAPERLESS_CACHE_BACKEND") is None:
-    CACHES["default"]["BACKEND"] = (
-        "django.core.cache.backends.locmem.LocMemCache"  # pragma: no cover
+# Cachalot: Database read cache.
+def _parse_cachalot_settings():
+    ttl = __get_int("PAPERLESS_READ_CACHE_TTL", 3600)
+    ttl = min(ttl, 31536000) if ttl > 0 else 3600
+    _, redis_url = _parse_redis_url(
+        os.getenv("PAPERLESS_READ_CACHE_REDIS_URL", _CHANNELS_REDIS_URL),
     )
+    result = {
+        "CACHALOT_CACHE": "read-cache",
+        "CACHALOT_ENABLED": __get_boolean(
+            "PAPERLESS_DB_READ_CACHE_ENABLED",
+            default="no",
+        ),
+        "CACHALOT_FINAL_SQL_CHECK": True,
+        "CACHALOT_QUERY_KEYGEN": "paperless.db_cache.custom_get_query_cache_key",
+        "CACHALOT_TABLE_KEYGEN": "paperless.db_cache.custom_get_table_cache_key",
+        "CACHALOT_REDIS_URL": redis_url,
+        "CACHALOT_TIMEOUT": ttl,
+    }
+    return result
+
+
+cachalot_settings = _parse_cachalot_settings()
+CACHALOT_ENABLED = cachalot_settings["CACHALOT_ENABLED"]
+if CACHALOT_ENABLED:  # pragma: no cover
+    INSTALLED_APPS.append("cachalot")
+CACHALOT_CACHE = cachalot_settings["CACHALOT_CACHE"]
+CACHALOT_TIMEOUT = cachalot_settings["CACHALOT_TIMEOUT"]
+CACHALOT_QUERY_KEYGEN = cachalot_settings["CACHALOT_QUERY_KEYGEN"]
+CACHALOT_TABLE_KEYGEN = cachalot_settings["CACHALOT_TABLE_KEYGEN"]
+CACHALOT_FINAL_SQL_CHECK = cachalot_settings["CACHALOT_FINAL_SQL_CHECK"]
+
+
+# Django default & Cachalot cache configuration
+_CACHE_BACKEND = os.environ.get(
+    "PAPERLESS_CACHE_BACKEND",
+    "django.core.cache.backends.locmem.LocMemCache"
+    if DEBUG
+    else "django.core.cache.backends.redis.RedisCache",
+)
+
+
+def _parse_caches():
+    return {
+        "default": {
+            "BACKEND": _CACHE_BACKEND,
+            "LOCATION": _CHANNELS_REDIS_URL,
+            "KEY_PREFIX": _REDIS_KEY_PREFIX,
+        },
+        "read-cache": {
+            "BACKEND": _CACHE_BACKEND,
+            "LOCATION": cachalot_settings["CACHALOT_REDIS_URL"],
+            "KEY_PREFIX": _REDIS_KEY_PREFIX,
+        },
+    }
+
+
+CACHES = _parse_caches()
 
 
 def default_threads_per_worker(task_workers) -> int:
@@ -1094,6 +1171,84 @@ POST_CONSUME_SCRIPT = os.getenv("PAPERLESS_POST_CONSUME_SCRIPT")
 DATE_ORDER = os.getenv("PAPERLESS_DATE_ORDER", "DMY")
 FILENAME_DATE_ORDER = os.getenv("PAPERLESS_FILENAME_DATE_ORDER")
 
+
+def _ocr_to_dateparser_languages(ocr_languages: str) -> list[str]:
+    """
+    Convert Tesseract OCR_LANGUAGE codes (ISO 639-2, e.g. "eng+fra", with optional scripts like "aze_Cyrl")
+    into a list of locales compatible with the `dateparser` library.
+
+    - If a script is provided (e.g., "aze_Cyrl"), attempts to use the full locale (e.g., "az-Cyrl").
+    Falls back to the base language (e.g., "az") if needed.
+    - If a language cannot be mapped or validated, it is skipped with a warning.
+    - Returns a list of valid locales, or an empty list if none could be converted.
+    """
+    ocr_to_dateparser = ocr_to_dateparser_languages()
+    loader = LocaleDataLoader()
+    result = []
+    try:
+        for ocr_language in ocr_languages.split("+"):
+            # Split into language and optional script
+            ocr_lang_part, *script = ocr_language.split("_")
+            ocr_script_part = script[0] if script else None
+
+            language_part = ocr_to_dateparser.get(ocr_lang_part)
+            if language_part is None:
+                logger.warning(
+                    f'Skipping unknown OCR language "{ocr_language}" — no dateparser equivalent.',
+                )
+                continue
+
+            # Ensure base language is supported by dateparser
+            loader.get_locale_map(locales=[language_part])
+
+            # Try to add the script part if it's supported by dateparser
+            if ocr_script_part:
+                dateparser_language = f"{language_part}-{ocr_script_part.title()}"
+                try:
+                    loader.get_locale_map(locales=[dateparser_language])
+                except Exception:
+                    logger.warning(
+                        f"Language variant '{dateparser_language}' not supported by dateparser; falling back to base language '{language_part}'. You can manually set PAPERLESS_DATE_PARSER_LANGUAGES if needed.",
+                    )
+                    dateparser_language = language_part
+            else:
+                dateparser_language = language_part
+            if dateparser_language not in result:
+                result.append(dateparser_language)
+    except Exception as e:
+        logger.warning(
+            f"Could not configure dateparser languages. Set PAPERLESS_DATE_PARSER_LANGUAGES parameter to avoid this. Detail: {e}",
+        )
+        return []
+    if not result:
+        logger.warning(
+            "Could not configure any dateparser languages from OCR_LANGUAGE — fallback to autodetection.",
+        )
+    return result
+
+
+def _parse_dateparser_languages(languages: str | None):
+    language_list = languages.split("+") if languages else []
+    # There is an unfixed issue in zh-Hant and zh-Hans locales in the dateparser lib.
+    # See: https://github.com/scrapinghub/dateparser/issues/875
+    for index, language in enumerate(language_list):
+        if language.startswith("zh-") and "zh" not in language_list:
+            logger.warning(
+                f'Chinese locale detected: {language}. dateparser might fail to parse some dates with this locale, so Chinese ("zh") will be used as a fallback.',
+            )
+            language_list.append("zh")
+
+    return list(LocaleDataLoader().get_locale_map(locales=language_list))
+
+
+if os.getenv("PAPERLESS_DATE_PARSER_LANGUAGES"):
+    DATE_PARSER_LANGUAGES = _parse_dateparser_languages(
+        os.getenv("PAPERLESS_DATE_PARSER_LANGUAGES"),
+    )
+else:
+    DATE_PARSER_LANGUAGES = _ocr_to_dateparser_languages(OCR_LANGUAGE)
+
+
 # Maximum number of dates taken from document start to end to show as suggestions for
 # `created` date in the frontend. Duplicates are removed, which can result in
 # fewer dates shown.
@@ -1219,24 +1374,6 @@ def _get_nltk_language_setting(ocr_lang: str) -> str | None:
 NLTK_ENABLED: Final[bool] = __get_boolean("PAPERLESS_ENABLE_NLTK", "yes")
 
 NLTK_LANGUAGE: str | None = _get_nltk_language_setting(OCR_LANGUAGE)
-
-###############################################################################
-# Email (SMTP) Backend                                                        #
-###############################################################################
-
-EMAIL_HOST: Final[str] = os.getenv("PAPERLESS_EMAIL_HOST", "localhost")
-EMAIL_PORT: Final[int] = int(os.getenv("PAPERLESS_EMAIL_PORT", 25))
-EMAIL_HOST_USER: Final[str] = os.getenv("PAPERLESS_EMAIL_HOST_USER", "")
-EMAIL_HOST_PASSWORD: Final[str] = os.getenv("PAPERLESS_EMAIL_HOST_PASSWORD", "")
-DEFAULT_FROM_EMAIL: Final[str] = os.getenv("PAPERLESS_EMAIL_FROM", EMAIL_HOST_USER)
-EMAIL_USE_TLS: Final[bool] = __get_boolean("PAPERLESS_EMAIL_USE_TLS")
-EMAIL_USE_SSL: Final[bool] = __get_boolean("PAPERLESS_EMAIL_USE_SSL")
-EMAIL_SUBJECT_PREFIX: Final[str] = "[Paperless-ngx] "
-EMAIL_TIMEOUT = 30.0
-EMAIL_ENABLED = EMAIL_HOST != "localhost" or EMAIL_HOST_USER != ""
-if DEBUG:  # pragma: no cover
-    EMAIL_BACKEND = "django.core.mail.backends.filebased.EmailBackend"
-    EMAIL_FILE_PATH = BASE_DIR / "sent_emails"
 
 ###############################################################################
 # Email Preprocessors                                                         #

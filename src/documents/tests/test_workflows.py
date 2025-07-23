@@ -25,6 +25,7 @@ from documents import tasks
 from documents.data_models import ConsumableDocument
 from documents.data_models import DocumentSource
 from documents.matching import document_matches_workflow
+from documents.matching import prefilter_documents_by_workflowtrigger
 from documents.models import Correspondent
 from documents.models import CustomField
 from documents.models import CustomFieldInstance
@@ -1336,6 +1337,8 @@ class TestWorkflows(
         GIVEN:
             - Existing workflow with SCHEDULED trigger against the created field and action that assigns owner
             - Existing doc that matches the trigger
+            - Workflow set to trigger at (now - offset) = now - 1 day
+            - Document created date is 2 days ago → trigger condition met
         WHEN:
             - Scheduled workflows are checked
         THEN:
@@ -1359,7 +1362,7 @@ class TestWorkflows(
         w.save()
 
         now = timezone.localtime(timezone.now())
-        created = now - timedelta(weeks=520)
+        created = now - timedelta(days=2)
         doc = Document.objects.create(
             title="sample test",
             correspondent=self.c,
@@ -1377,6 +1380,8 @@ class TestWorkflows(
         GIVEN:
             - Existing workflow with SCHEDULED trigger against the added field and action that assigns owner
             - Existing doc that matches the trigger
+            - Workflow set to trigger at (now - offset) = now - 1 day
+            - Document added date is 365 days ago
         WHEN:
             - Scheduled workflows are checked
         THEN:
@@ -1418,6 +1423,8 @@ class TestWorkflows(
         GIVEN:
             - Existing workflow with SCHEDULED trigger against the modified field and action that assigns owner
             - Existing doc that matches the trigger
+            - Workflow set to trigger at (now - offset) = now - 1 day
+            - Document modified date is mocked as sufficiently in the past
         WHEN:
             - Scheduled workflows are checked
         THEN:
@@ -1458,6 +1465,8 @@ class TestWorkflows(
         GIVEN:
             - Existing workflow with SCHEDULED trigger against a custom field and action that assigns owner
             - Existing doc that matches the trigger
+            - Workflow set to trigger at (now - offset) = now - 1 day
+            - Custom field date is 2 days ago
         WHEN:
             - Scheduled workflows are checked
         THEN:
@@ -1502,6 +1511,7 @@ class TestWorkflows(
         GIVEN:
             - Existing workflow with SCHEDULED trigger
             - Existing doc that has already had the workflow run
+            - Document created 2 days ago, workflow offset = 1 day → trigger time = yesterday
         WHEN:
             - Scheduled workflows are checked
         THEN:
@@ -1552,6 +1562,7 @@ class TestWorkflows(
         GIVEN:
             - Existing workflow with SCHEDULED trigger and recurring interval of 7 days
             - Workflow run date is 6 days ago
+            - Document created 40 days ago, offset = 30 → trigger time = 10 days ago
         WHEN:
             - Scheduled workflows are checked
         THEN:
@@ -1599,6 +1610,202 @@ class TestWorkflows(
 
             doc.refresh_from_db()
             self.assertIsNone(doc.owner)
+
+    def test_workflow_scheduled_trigger_negative_offset_customfield(self):
+        """
+        GIVEN:
+            - Workflow with offset -7 (i.e., 7 days *before* the date)
+            - doc1: value_date = 5 days ago → trigger time = 12 days ago → triggers
+            - doc2: value_date = 9 days in future → trigger time = 2 days in future → does NOT trigger
+        WHEN:
+            - Scheduled workflows are checked
+        THEN:
+            - doc1 has owner assigned
+            - doc2 remains untouched
+        """
+        trigger = WorkflowTrigger.objects.create(
+            type=WorkflowTrigger.WorkflowTriggerType.SCHEDULED,
+            schedule_offset_days=-7,
+            schedule_date_field=WorkflowTrigger.ScheduleDateField.CUSTOM_FIELD,
+            schedule_date_custom_field=self.cf1,
+        )
+        action = WorkflowAction.objects.create(
+            assign_title="Doc assign owner",
+            assign_owner=self.user2,
+        )
+        w = Workflow.objects.create(
+            name="Workflow 1",
+            order=0,
+        )
+        w.triggers.add(trigger)
+        w.actions.add(action)
+        w.save()
+
+        doc1 = Document.objects.create(
+            title="doc1",
+            correspondent=self.c,
+            original_filename="doc1.pdf",
+            checksum="doc1-checksum",
+        )
+        CustomFieldInstance.objects.create(
+            document=doc1,
+            field=self.cf1,
+            value_date=timezone.now().date() - timedelta(days=5),
+        )
+
+        doc2 = Document.objects.create(
+            title="doc2",
+            correspondent=self.c,
+            original_filename="doc2.pdf",
+            checksum="doc2-checksum",
+        )
+        CustomFieldInstance.objects.create(
+            document=doc2,
+            field=self.cf1,
+            value_date=timezone.now().date() + timedelta(days=9),
+        )
+
+        tasks.check_scheduled_workflows()
+
+        doc1.refresh_from_db()
+        self.assertEqual(doc1.owner, self.user2)
+
+        doc2.refresh_from_db()
+        self.assertIsNone(doc2.owner)
+
+    def test_workflow_scheduled_trigger_negative_offset_created(self):
+        """
+        GIVEN:
+            - Existing workflow with SCHEDULED trigger and negative offset of -7 days (so 7 days before date)
+            - doc created 8 days ago → trigger time = 15 days ago → triggers
+            - doc2 created 8 days *in the future* → trigger time = 1 day in future → does NOT trigger
+        WHEN:
+            - Scheduled workflows are checked for document
+        THEN:
+            - doc is matched and owner updated
+            - doc2 is untouched
+        """
+        trigger = WorkflowTrigger.objects.create(
+            type=WorkflowTrigger.WorkflowTriggerType.SCHEDULED,
+            schedule_offset_days=-7,
+            schedule_date_field=WorkflowTrigger.ScheduleDateField.CREATED,
+        )
+        action = WorkflowAction.objects.create(
+            assign_title="Doc assign owner",
+            assign_owner=self.user2,
+        )
+        w = Workflow.objects.create(
+            name="Workflow 1",
+            order=0,
+        )
+        w.triggers.add(trigger)
+        w.actions.add(action)
+        w.save()
+
+        doc = Document.objects.create(
+            title="sample test",
+            correspondent=self.c,
+            original_filename="sample.pdf",
+            checksum="1",
+            created=timezone.now().date() - timedelta(days=8),
+        )
+
+        doc2 = Document.objects.create(
+            title="sample test 2",
+            correspondent=self.c,
+            original_filename="sample2.pdf",
+            checksum="2",
+            created=timezone.now().date() + timedelta(days=8),
+        )
+
+        tasks.check_scheduled_workflows()
+        doc.refresh_from_db()
+        self.assertEqual(doc.owner, self.user2)
+        doc2.refresh_from_db()
+        self.assertIsNone(doc2.owner)  # has not triggered yet
+
+    def test_offset_positive_means_after(self):
+        """
+        GIVEN:
+            - Document created 30 days ago
+            - Workflow with offset +10
+        EXPECT:
+            - It triggers now, because created + 10 = 20 days ago < now
+        """
+        doc = Document.objects.create(
+            title="Test doc",
+            created=timezone.now() - timedelta(days=30),
+            correspondent=self.c,
+            original_filename="test.pdf",
+        )
+        trigger = WorkflowTrigger.objects.create(
+            type=WorkflowTrigger.WorkflowTriggerType.SCHEDULED,
+            schedule_date_field=WorkflowTrigger.ScheduleDateField.CREATED,
+            schedule_offset_days=10,
+        )
+        action = WorkflowAction.objects.create(
+            assign_title="Doc assign owner",
+            assign_owner=self.user2,
+        )
+        w = Workflow.objects.create(
+            name="Workflow 1",
+            order=0,
+        )
+        w.triggers.add(trigger)
+        w.actions.add(action)
+        w.save()
+        tasks.check_scheduled_workflows()
+        doc.refresh_from_db()
+        self.assertEqual(doc.owner, self.user2)
+
+    def test_workflow_scheduled_filters_queryset(self):
+        """
+        GIVEN:
+            - Existing workflow with scheduled trigger
+        WHEN:
+            - Workflows run and matching documents are found
+        THEN:
+            - prefilter_documents_by_workflowtrigger appropriately filters
+        """
+        trigger = WorkflowTrigger.objects.create(
+            type=WorkflowTrigger.WorkflowTriggerType.SCHEDULED,
+            schedule_offset_days=-7,
+            schedule_date_field=WorkflowTrigger.ScheduleDateField.CREATED,
+            filter_filename="*sample*",
+            filter_has_document_type=self.dt,
+            filter_has_correspondent=self.c,
+        )
+        trigger.filter_has_tags.set([self.t1])
+        trigger.save()
+        action = WorkflowAction.objects.create(
+            assign_owner=self.user2,
+        )
+        w = Workflow.objects.create(
+            name="Workflow 1",
+            order=0,
+        )
+        w.triggers.add(trigger)
+        w.actions.add(action)
+        w.save()
+
+        # create 10 docs with half having the document type
+        for i in range(10):
+            doc = Document.objects.create(
+                title=f"sample test {i}",
+                checksum=f"checksum{i}",
+                correspondent=self.c,
+                original_filename=f"sample_{i}.pdf",
+                document_type=self.dt if i % 2 == 0 else None,
+            )
+            doc.tags.set([self.t1])
+            doc.save()
+
+        documents = Document.objects.all()
+        filtered_docs = prefilter_documents_by_workflowtrigger(
+            documents,
+            trigger,
+        )
+        self.assertEqual(filtered_docs.count(), 5)
 
     def test_workflow_enabled_disabled(self):
         trigger = WorkflowTrigger.objects.create(
