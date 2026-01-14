@@ -66,6 +66,7 @@ import { SettingsService } from 'src/app/services/settings.service'
 import { ToastService } from 'src/app/services/toast.service'
 import { environment } from 'src/environments/environment'
 import { ConfirmDialogComponent } from '../common/confirm-dialog/confirm-dialog.component'
+import { PasswordRemovalConfirmDialogComponent } from '../common/confirm-dialog/password-removal-confirm-dialog/password-removal-confirm-dialog.component'
 import { CustomFieldsDropdownComponent } from '../common/custom-fields-dropdown/custom-fields-dropdown.component'
 import {
   DocumentDetailComponent,
@@ -156,6 +157,16 @@ describe('DocumentDetailComponent', () => {
         {
           provide: TagService,
           useValue: {
+            getCachedMany: (ids: number[]) =>
+              of(
+                ids.map((id) => ({
+                  id,
+                  name: `Tag${id}`,
+                  is_inbox_tag: true,
+                  color: '#ff0000',
+                  text_color: '#000000',
+                }))
+              ),
             listAll: () =>
               of({
                 count: 3,
@@ -382,8 +393,32 @@ describe('DocumentDetailComponent', () => {
     currentUserCan = true
   })
 
-  it('should support creating document type', () => {
+  it('should support creating tag, remove from suggestions', () => {
     initNormally()
+    component.suggestions = {
+      suggested_tags: ['Tag1', 'NewTag12'],
+    }
+    let openModal: NgbModalRef
+    modalService.activeInstances.subscribe((modal) => (openModal = modal[0]))
+    const modalSpy = jest.spyOn(modalService, 'open')
+    component.createTag('NewTag12')
+    expect(modalSpy).toHaveBeenCalled()
+    openModal.componentInstance.succeeded.next({
+      id: 12,
+      name: 'NewTag12',
+      is_inbox_tag: true,
+      color: '#ff0000',
+      text_color: '#000000',
+    })
+    expect(component.tagsInput.value).toContain(12)
+    expect(component.suggestions.suggested_tags).not.toContain('NewTag12')
+  })
+
+  it('should support creating document type, remove from suggestions', () => {
+    initNormally()
+    component.suggestions = {
+      suggested_document_types: ['DocumentType1', 'NewDocType2'],
+    }
     let openModal: NgbModalRef
     modalService.activeInstances.subscribe((modal) => (openModal = modal[0]))
     const modalSpy = jest.spyOn(modalService, 'open')
@@ -391,10 +426,16 @@ describe('DocumentDetailComponent', () => {
     expect(modalSpy).toHaveBeenCalled()
     openModal.componentInstance.succeeded.next({ id: 12, name: 'NewDocType12' })
     expect(component.documentForm.get('document_type').value).toEqual(12)
+    expect(component.suggestions.suggested_document_types).not.toContain(
+      'NewDocType2'
+    )
   })
 
-  it('should support creating correspondent', () => {
+  it('should support creating correspondent, remove from suggestions', () => {
     initNormally()
+    component.suggestions = {
+      suggested_correspondents: ['Correspondent1', 'NewCorrrespondent12'],
+    }
     let openModal: NgbModalRef
     modalService.activeInstances.subscribe((modal) => (openModal = modal[0]))
     const modalSpy = jest.spyOn(modalService, 'open')
@@ -405,6 +446,9 @@ describe('DocumentDetailComponent', () => {
       name: 'NewCorrrespondent12',
     })
     expect(component.documentForm.get('correspondent').value).toEqual(12)
+    expect(component.suggestions.suggested_correspondents).not.toContain(
+      'NewCorrrespondent12'
+    )
   })
 
   it('should support creating storage path', () => {
@@ -448,6 +492,18 @@ describe('DocumentDetailComponent', () => {
       .spyOn(activatedRoute, 'paramMap', 'get')
       .mockReturnValue(of(convertToParamMap({ id: 999, section: 'details' })))
     jest.spyOn(documentService, 'get').mockReturnValueOnce(of(null))
+    fixture.detectChanges()
+    expect(navigateSpy).toHaveBeenCalledWith(['404'], { replaceUrl: true })
+  })
+
+  it('should navigate to 404 if error on load', () => {
+    jest
+      .spyOn(activatedRoute, 'paramMap', 'get')
+      .mockReturnValue(of(convertToParamMap({ id: 3, section: 'details' })))
+    const navigateSpy = jest.spyOn(router, 'navigate')
+    jest
+      .spyOn(documentService, 'get')
+      .mockReturnValue(throwError(() => new Error('not found')))
     fixture.detectChanges()
     expect(navigateSpy).toHaveBeenCalledWith(['404'], { replaceUrl: true })
   })
@@ -983,7 +1039,7 @@ describe('DocumentDetailComponent', () => {
     expect(component.document.custom_fields).toHaveLength(initialLength - 1)
     expect(component.customFieldFormFields).toHaveLength(initialLength - 1)
     expect(
-      fixture.debugElement.query(By.css('form')).nativeElement.textContent
+      fixture.debugElement.query(By.css('form ul')).nativeElement.textContent
     ).not.toContain('Field 1')
     const patchSpy = jest.spyOn(documentService, 'patch')
     component.save(true)
@@ -1074,10 +1130,22 @@ describe('DocumentDetailComponent', () => {
 
   it('should get suggestions', () => {
     const suggestionsSpy = jest.spyOn(documentService, 'getSuggestions')
-    suggestionsSpy.mockReturnValue(of({ tags: [42, 43] }))
+    suggestionsSpy.mockReturnValue(
+      of({
+        tags: [42, 43],
+        suggested_tags: [],
+        suggested_document_types: [],
+        suggested_correspondents: [],
+      })
+    )
     initNormally()
     expect(suggestionsSpy).toHaveBeenCalled()
-    expect(component.suggestions).toEqual({ tags: [42, 43] })
+    expect(component.suggestions).toEqual({
+      tags: [42, 43],
+      suggested_tags: [],
+      suggested_document_types: [],
+      suggested_correspondents: [],
+    })
   })
 
   it('should show error if needed for get suggestions', () => {
@@ -1158,87 +1226,131 @@ describe('DocumentDetailComponent', () => {
     ).not.toBeUndefined()
   })
 
-  it('should support split', () => {
+  it('should support pdf editor, handle error', () => {
     let modal: NgbModalRef
     modalService.activeInstances.subscribe((m) => (modal = m[0]))
+    const closeSpy = jest.spyOn(openDocumentsService, 'closeDocument')
+    const errorSpy = jest.spyOn(toastService, 'showError')
     initNormally()
-    component.splitDocument()
+    component.editPdf()
     expect(modal).not.toBeUndefined()
     modal.componentInstance.documentID = doc.id
-    modal.componentInstance.totalPages = 5
-    modal.componentInstance.page = 2
-    modal.componentInstance.addSplit()
+    modal.componentInstance.pages = [{ page: 1, rotate: 0, splitAfter: false }]
     modal.componentInstance.confirm()
     let req = httpTestingController.expectOne(
       `${environment.apiBaseUrl}documents/bulk_edit/`
     )
     expect(req.request.body).toEqual({
       documents: [doc.id],
-      method: 'split',
-      parameters: { pages: '1-2,3-5', delete_originals: false },
+      method: 'edit_pdf',
+      parameters: {
+        operations: [{ page: 1, rotate: 0, doc: 0 }],
+        delete_original: false,
+        update_document: false,
+        include_metadata: true,
+      },
     })
-    req.error(new ProgressEvent('failed'))
+    req.error(new ErrorEvent('failed'))
+    expect(errorSpy).toHaveBeenCalled()
+
+    component.editPdf()
+    modal.componentInstance.documentID = doc.id
+    modal.componentInstance.pages = [{ page: 1, rotate: 0, splitAfter: true }]
+    modal.componentInstance.deleteOriginal = true
     modal.componentInstance.confirm()
     req = httpTestingController.expectOne(
       `${environment.apiBaseUrl}documents/bulk_edit/`
     )
+    req.flush(true)
+    expect(closeSpy).toHaveBeenCalled()
+  })
+
+  it('should support removing password protection from pdfs', () => {
+    let modal: NgbModalRef
+    modalService.activeInstances.subscribe((m) => (modal = m[0]))
+    initNormally()
+    component.password = 'secret'
+    component.removePassword()
+    const dialog =
+      modal.componentInstance as PasswordRemovalConfirmDialogComponent
+    dialog.updateDocument = false
+    dialog.includeMetadata = false
+    dialog.deleteOriginal = true
+    dialog.confirm()
+    const req = httpTestingController.expectOne(
+      `${environment.apiBaseUrl}documents/bulk_edit/`
+    )
+    expect(req.request.body).toEqual({
+      documents: [doc.id],
+      method: 'remove_password',
+      parameters: {
+        password: 'secret',
+        update_document: false,
+        include_metadata: false,
+        delete_original: true,
+      },
+    })
     req.flush(true)
   })
 
-  it('should support rotate', () => {
-    let modal: NgbModalRef
-    modalService.activeInstances.subscribe((m) => (modal = m[0]))
+  it('should require the current password before removing it', () => {
     initNormally()
-    component.rotateDocument()
-    expect(modal).not.toBeUndefined()
-    modal.componentInstance.documentID = doc.id
-    modal.componentInstance.rotate()
-    modal.componentInstance.confirm()
-    let req = httpTestingController.expectOne(
+    const errorSpy = jest.spyOn(toastService, 'showError')
+    component.requiresPassword = true
+    component.password = ''
+
+    component.removePassword()
+
+    expect(errorSpy).toHaveBeenCalled()
+    httpTestingController.expectNone(
       `${environment.apiBaseUrl}documents/bulk_edit/`
     )
-    expect(req.request.body).toEqual({
-      documents: [doc.id],
-      method: 'rotate',
-      parameters: { degrees: 90 },
-    })
-    req.error(new ProgressEvent('failed'))
-    modal.componentInstance.confirm()
-    req = httpTestingController.expectOne(
-      `${environment.apiBaseUrl}documents/bulk_edit/`
-    )
-    req.flush(true)
   })
 
-  it('should support delete pages', () => {
+  it('should handle failures when removing password protection', () => {
     let modal: NgbModalRef
     modalService.activeInstances.subscribe((m) => (modal = m[0]))
     initNormally()
-    component.deletePages()
-    expect(modal).not.toBeUndefined()
-    modal.componentInstance.documentID = doc.id
-    modal.componentInstance.pages = [1, 2]
-    modal.componentInstance.confirm()
-    let req = httpTestingController.expectOne(
+    const errorSpy = jest.spyOn(toastService, 'showError')
+    component.password = 'secret'
+
+    component.removePassword()
+    const dialog =
+      modal.componentInstance as PasswordRemovalConfirmDialogComponent
+    dialog.confirm()
+    const req = httpTestingController.expectOne(
       `${environment.apiBaseUrl}documents/bulk_edit/`
     )
-    expect(req.request.body).toEqual({
-      documents: [doc.id],
-      method: 'delete_pages',
-      parameters: { pages: [1, 2] },
-    })
-    req.error(new ProgressEvent('failed'))
-    modal.componentInstance.confirm()
-    req = httpTestingController.expectOne(
+    req.error(new ErrorEvent('failed'))
+
+    expect(errorSpy).toHaveBeenCalled()
+    expect(component.networkActive).toBe(false)
+    expect(dialog.buttonsEnabled).toBe(true)
+  })
+
+  it('should refresh the document when removing password in update mode', () => {
+    let modal: NgbModalRef
+    modalService.activeInstances.subscribe((m) => (modal = m[0]))
+    const refreshSpy = jest.spyOn(openDocumentsService, 'refreshDocument')
+    initNormally()
+    component.password = 'secret'
+
+    component.removePassword()
+    const dialog =
+      modal.componentInstance as PasswordRemovalConfirmDialogComponent
+    dialog.confirm()
+    const req = httpTestingController.expectOne(
       `${environment.apiBaseUrl}documents/bulk_edit/`
     )
     req.flush(true)
+
+    expect(refreshSpy).toHaveBeenCalledWith(doc.id)
   })
 
   it('should support keyboard shortcuts', () => {
     initNormally()
 
-    jest.spyOn(component, 'hasNext').mockReturnValue(true)
+    const hasNextSpy = jest.spyOn(component, 'hasNext').mockReturnValue(true)
     const nextSpy = jest.spyOn(component, 'nextDoc')
     document.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'arrowright', ctrlKey: true })
@@ -1252,20 +1364,31 @@ describe('DocumentDetailComponent', () => {
     )
     expect(prevSpy).toHaveBeenCalled()
 
-    jest.spyOn(openDocumentsService, 'isDirty').mockReturnValue(true)
+    const isDirtySpy = jest
+      .spyOn(openDocumentsService, 'isDirty')
+      .mockReturnValue(true)
     const saveSpy = jest.spyOn(component, 'save')
     document.dispatchEvent(
       new KeyboardEvent('keydown', { key: 's', ctrlKey: true })
     )
     expect(saveSpy).toHaveBeenCalled()
 
-    jest.spyOn(openDocumentsService, 'isDirty').mockReturnValue(true)
-    jest.spyOn(component, 'hasNext').mockReturnValue(true)
+    hasNextSpy.mockReturnValue(true)
     const saveNextSpy = jest.spyOn(component, 'saveEditNext')
     document.dispatchEvent(
       new KeyboardEvent('keydown', { key: 's', ctrlKey: true, shiftKey: true })
     )
     expect(saveNextSpy).toHaveBeenCalled()
+
+    saveSpy.mockClear()
+    saveNextSpy.mockClear()
+    isDirtySpy.mockReturnValue(true)
+    hasNextSpy.mockReturnValue(false)
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 's', ctrlKey: true, shiftKey: true })
+    )
+    expect(saveNextSpy).not.toHaveBeenCalled()
+    expect(saveSpy).toHaveBeenCalledWith(true)
 
     const closeSpy = jest.spyOn(component, 'close')
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'escape' }))
@@ -1425,5 +1548,201 @@ describe('DocumentDetailComponent', () => {
     expect(modalSpy).toHaveBeenCalled()
     component.openEmailDocument()
     expect(modalSpy).toHaveBeenCalled()
+  })
+
+  it('should set previewText', () => {
+    initNormally()
+    const previewText = 'Hello world, this is a test'
+    httpTestingController.expectOne(component.previewUrl).flush(previewText)
+    expect(component.previewText).toEqual(previewText)
+  })
+
+  it('should set previewText to error message if preview fails', () => {
+    initNormally()
+    httpTestingController
+      .expectOne(component.previewUrl)
+      .flush('fail', { status: 500, statusText: 'Server Error' })
+    expect(component.previewText).toContain('An error occurred loading content')
+  })
+
+  it('should print document successfully', fakeAsync(() => {
+    initNormally()
+
+    const appendChildSpy = jest
+      .spyOn(document.body, 'appendChild')
+      .mockImplementation((node: Node) => node)
+    const removeChildSpy = jest
+      .spyOn(document.body, 'removeChild')
+      .mockImplementation((node: Node) => node)
+    const createObjectURLSpy = jest
+      .spyOn(URL, 'createObjectURL')
+      .mockReturnValue('blob:mock-url')
+    const revokeObjectURLSpy = jest
+      .spyOn(URL, 'revokeObjectURL')
+      .mockImplementation(() => {})
+
+    const mockContentWindow = {
+      focus: jest.fn(),
+      print: jest.fn(),
+      onafterprint: null,
+    }
+
+    const mockIframe = {
+      style: {},
+      src: '',
+      onload: null,
+      contentWindow: mockContentWindow,
+    }
+
+    const createElementSpy = jest
+      .spyOn(document, 'createElement')
+      .mockReturnValue(mockIframe as any)
+
+    const blob = new Blob(['test'], { type: 'application/pdf' })
+    component.printDocument()
+
+    const req = httpTestingController.expectOne(
+      `${environment.apiBaseUrl}documents/${doc.id}/download/`
+    )
+    req.flush(blob)
+
+    tick()
+
+    expect(createElementSpy).toHaveBeenCalledWith('iframe')
+    expect(appendChildSpy).toHaveBeenCalledWith(mockIframe)
+    expect(createObjectURLSpy).toHaveBeenCalledWith(blob)
+
+    if (mockIframe.onload) {
+      mockIframe.onload({} as any)
+    }
+
+    expect(mockContentWindow.focus).toHaveBeenCalled()
+    expect(mockContentWindow.print).toHaveBeenCalled()
+
+    if (mockIframe.onload) {
+      mockIframe.onload(new Event('load'))
+    }
+
+    if (mockContentWindow.onafterprint) {
+      mockContentWindow.onafterprint(new Event('afterprint'))
+    }
+
+    tick(500)
+
+    expect(removeChildSpy).toHaveBeenCalledWith(mockIframe)
+    expect(revokeObjectURLSpy).toHaveBeenCalledWith('blob:mock-url')
+
+    createElementSpy.mockRestore()
+    appendChildSpy.mockRestore()
+    removeChildSpy.mockRestore()
+    createObjectURLSpy.mockRestore()
+    revokeObjectURLSpy.mockRestore()
+  }))
+
+  it('should show error toast if print document fails', () => {
+    initNormally()
+    const toastSpy = jest.spyOn(toastService, 'showError')
+    component.printDocument()
+    const req = httpTestingController.expectOne(
+      `${environment.apiBaseUrl}documents/${doc.id}/download/`
+    )
+    req.error(new ErrorEvent('failed'))
+    expect(toastSpy).toHaveBeenCalledWith(
+      'Error loading document for printing.'
+    )
+  })
+
+  const iframePrintErrorCases: Array<{
+    description: string
+    thrownError: Error
+    expectToast: boolean
+  }> = [
+    {
+      description: 'should show error toast if printing throws inside iframe',
+      thrownError: new Error('focus failed'),
+      expectToast: true,
+    },
+    {
+      description:
+        'should suppress toast if cross-origin afterprint error occurs',
+      thrownError: new DOMException(
+        'Accessing onafterprint triggered a cross-origin violation',
+        'SecurityError'
+      ),
+      expectToast: false,
+    },
+  ]
+
+  iframePrintErrorCases.forEach(({ description, thrownError, expectToast }) => {
+    it(
+      description,
+      fakeAsync(() => {
+        initNormally()
+
+        const appendChildSpy = jest
+          .spyOn(document.body, 'appendChild')
+          .mockImplementation((node: Node) => node)
+        const removeChildSpy = jest
+          .spyOn(document.body, 'removeChild')
+          .mockImplementation((node: Node) => node)
+        const createObjectURLSpy = jest
+          .spyOn(URL, 'createObjectURL')
+          .mockReturnValue('blob:mock-url')
+        const revokeObjectURLSpy = jest
+          .spyOn(URL, 'revokeObjectURL')
+          .mockImplementation(() => {})
+
+        const toastSpy = jest.spyOn(toastService, 'showError')
+
+        const mockContentWindow = {
+          focus: jest.fn().mockImplementation(() => {
+            throw thrownError
+          }),
+          print: jest.fn(),
+          onafterprint: null,
+        }
+
+        const mockIframe: any = {
+          style: {},
+          src: '',
+          onload: null,
+          contentWindow: mockContentWindow,
+        }
+
+        const createElementSpy = jest
+          .spyOn(document, 'createElement')
+          .mockReturnValue(mockIframe as any)
+
+        const blob = new Blob(['test'], { type: 'application/pdf' })
+        component.printDocument()
+
+        const req = httpTestingController.expectOne(
+          `${environment.apiBaseUrl}documents/${doc.id}/download/`
+        )
+        req.flush(blob)
+
+        tick()
+
+        if (mockIframe.onload) {
+          mockIframe.onload(new Event('load'))
+        }
+
+        tick(200)
+
+        if (expectToast) {
+          expect(toastSpy).toHaveBeenCalled()
+        } else {
+          expect(toastSpy).not.toHaveBeenCalled()
+        }
+        expect(removeChildSpy).toHaveBeenCalledWith(mockIframe)
+        expect(revokeObjectURLSpy).toHaveBeenCalledWith('blob:mock-url')
+
+        createElementSpy.mockRestore()
+        appendChildSpy.mockRestore()
+        removeChildSpy.mockRestore()
+        createObjectURLSpy.mockRestore()
+        revokeObjectURLSpy.mockRestore()
+      })
+    )
   })
 })

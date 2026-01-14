@@ -164,6 +164,9 @@ class BarcodePlugin(ConsumeTaskPlugin):
                         mailrule_id=self.input_doc.mailrule_id,
                         # Can't use same folder or the consume might grab it again
                         original_file=(tmp_dir / new_document.name).resolve(),
+                        # Adding optional original_path for later uses in
+                        # workflow matching
+                        original_path=self.input_doc.original_file,
                     ),
                     # All the same metadata
                     self.metadata,
@@ -183,7 +186,11 @@ class BarcodePlugin(ConsumeTaskPlugin):
 
         # Update/overwrite an ASN if possible
         # After splitting, as otherwise each split document gets the same ASN
-        if self.settings.barcode_enable_asn and (located_asn := self.asn) is not None:
+        if (
+            self.settings.barcode_enable_asn
+            and not self.metadata.skip_asn
+            and (located_asn := self.asn) is not None
+        ):
             logger.info(f"Found ASN in barcode: {located_asn}")
             self.metadata.asn = located_asn
 

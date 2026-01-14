@@ -44,6 +44,7 @@ import { SettingsService } from 'src/app/services/settings.service'
 import { TasksService } from 'src/app/services/tasks.service'
 import { ToastService } from 'src/app/services/toast.service'
 import { environment } from 'src/environments/environment'
+import { ChatComponent } from '../chat/chat/chat.component'
 import { ProfileEditDialogComponent } from '../common/profile-edit-dialog/profile-edit-dialog.component'
 import { DocumentDetailComponent } from '../document-detail/document-detail.component'
 import { ComponentWithPermissions } from '../with-permissions/with-permissions.component'
@@ -59,6 +60,7 @@ import { ToastsDropdownComponent } from './toasts-dropdown/toasts-dropdown.compo
     DocumentTitlePipe,
     IfPermissionsDirective,
     ToastsDropdownComponent,
+    ChatComponent,
     RouterModule,
     NgClass,
     NgbDropdownModule,
@@ -145,11 +147,24 @@ export class AppFrameComponent
   }
 
   get versionString(): string {
-    return `${environment.appTitle} v${this.settingsService.get(SETTINGS_KEYS.VERSION)}${environment.production ? '' : ` #${environment.tag}`}`
+    return `${environment.appTitle} v${this.settingsService.get(SETTINGS_KEYS.VERSION)}${environment.tag === 'prod' ? '' : ` #${environment.tag}`}`
   }
 
   get customAppTitle(): string {
     return this.settingsService.get(SETTINGS_KEYS.APP_TITLE)
+  }
+
+  get canSaveSettings(): boolean {
+    return (
+      this.permissionsService.currentUserCan(
+        PermissionAction.Change,
+        PermissionType.UISettings
+      ) &&
+      this.permissionsService.currentUserCan(
+        PermissionAction.Add,
+        PermissionType.UISettings
+      )
+    )
   }
 
   get slimSidebarEnabled(): boolean {
@@ -169,6 +184,10 @@ export class AppFrameComponent
           console.warn(error)
         },
       })
+  }
+
+  get aiEnabled(): boolean {
+    return this.settingsService.get(SETTINGS_KEYS.AI_ENABLED)
   }
 
   closeMenu() {
@@ -287,6 +306,9 @@ export class AppFrameComponent
   }
 
   get showSidebarCounts(): boolean {
-    return this.settingsService.get(SETTINGS_KEYS.SIDEBAR_VIEWS_SHOW_COUNT)
+    return (
+      this.settingsService.get(SETTINGS_KEYS.SIDEBAR_VIEWS_SHOW_COUNT) &&
+      !this.settingsService.organizingSidebarSavedViews
+    )
   }
 }

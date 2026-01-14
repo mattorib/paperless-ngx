@@ -1,6 +1,7 @@
-import { NgClass, TitleCasePipe } from '@angular/common'
+import { NgClass, NgTemplateOutlet, TitleCasePipe } from '@angular/common'
 import { Component, inject } from '@angular/core'
 import { FormsModule, ReactiveFormsModule } from '@angular/forms'
+import { RouterModule } from '@angular/router'
 import {
   NgbDropdownModule,
   NgbPaginationModule,
@@ -10,7 +11,6 @@ import { FILTER_HAS_STORAGE_PATH_ANY } from 'src/app/data/filter-rule-type'
 import { StoragePath } from 'src/app/data/storage-path'
 import { IfPermissionsDirective } from 'src/app/directives/if-permissions.directive'
 import { SortableDirective } from 'src/app/directives/sortable.directive'
-import { SafeHtmlPipe } from 'src/app/pipes/safehtml.pipe'
 import { PermissionType } from 'src/app/services/permissions.service'
 import { StoragePathService } from 'src/app/services/rest/storage-path.service'
 import { StoragePathEditDialogComponent } from '../../common/edit-dialog/storage-path-edit-dialog/storage-path-edit-dialog.component'
@@ -26,10 +26,11 @@ import { ManagementListComponent } from '../management-list/management-list.comp
     PageHeaderComponent,
     TitleCasePipe,
     IfPermissionsDirective,
-    SafeHtmlPipe,
     FormsModule,
     ReactiveFormsModule,
+    RouterModule,
     NgClass,
+    NgTemplateOutlet,
     NgbDropdownModule,
     NgbPaginationModule,
     NgxBootstrapIconsModule,
@@ -48,10 +49,10 @@ export class StoragePathListComponent extends ManagementListComponent<StoragePat
       {
         key: 'path',
         name: $localize`Path`,
-        rendersHtml: true,
         hideOnMobile: true,
+        monospace: true,
         valueFn: (c: StoragePath) => {
-          return `<code>${c.path?.slice(0, 49)}${c.path?.length > 50 ? '...' : ''}</code>`
+          return `${c.path?.slice(0, 49)}${c.path?.length > 50 ? '...' : ''}`
         },
       },
     ]

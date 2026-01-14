@@ -170,11 +170,18 @@ Available options are `postgresql` and `mariadb`.
 
     !!! note
 
-    A small pool is typically sufficient — for example, a size of 4.
-    Make sure your PostgreSQL server's max_connections setting is large enough to handle:
-    ```(Paperless workers + Celery workers) × pool size + safety margin```
-    For example, with 4 Paperless workers and 2 Celery workers, and a pool size of 4:
-    (4 + 2) × 4 + 10 = 34 connections required.
+        A pool of 8-10 connections per worker is typically sufficient.
+        If you encounter error messages such as `couldn't get a connection`
+        or database connection timeouts, you probably need to increase the pool size.
+
+    !!! warning
+        Make sure your PostgreSQL `max_connections` setting is large enough to handle the connection pools:
+        `(NB_PAPERLESS_WORKERS + NB_CELERY_WORKERS) × POOL_SIZE + SAFETY_MARGIN`. For example, with
+        4 Paperless workers and 2 Celery workers, and a pool size of 8:``(4 + 2) × 8 + 10 = 58`,
+        so `max_connections = 60` (or even more) is appropriate.
+
+        This assumes only Paperless-ngx connects to your PostgreSQL instance. If you have other applications,
+        you should increase `max_connections` accordingly.
 
 #### [`PAPERLESS_DB_READ_CACHE_ENABLED=<bool>`](#PAPERLESS_DB_READ_CACHE_ENABLED) {#PAPERLESS_DB_READ_CACHE_ENABLED}
 
@@ -184,9 +191,9 @@ Available options are `postgresql` and `mariadb`.
 
     !!! danger
 
-    **Do not modify the database outside the application while it is running.**
-    This includes actions such as restoring a backup, upgrading the database, or performing manual inserts. All external modifications must be done **only when the application is stopped**.
-    After making any such changes, you **must invalidate the DB read cache** using the `invalidate_cachalot` management command.
+        **Do not modify the database outside the application while it is running.**
+        This includes actions such as restoring a backup, upgrading the database, or performing manual inserts. All external modifications must be done **only when the application is stopped**.
+        After making any such changes, you **must invalidate the DB read cache** using the `invalidate_cachalot` management command.
 
 #### [`PAPERLESS_READ_CACHE_TTL=<int>`](#PAPERLESS_READ_CACHE_TTL) {#PAPERLESS_READ_CACHE_TTL}
 
@@ -196,7 +203,7 @@ Available options are `postgresql` and `mariadb`.
 
     !!! warning
 
-    A high TTL increases memory usage over time. Memory may be used until end of TTL, even if the cache is invalidated with the `invalidate_cachalot` command.
+        A high TTL increases memory usage over time. Memory may be used until end of TTL, even if the cache is invalidated with the `invalidate_cachalot` command.
 
 In case of an out-of-memory (OOM) situation, Redis may stop accepting new data — including cache entries, scheduled tasks, and documents to consume.
 If your system has limited RAM, consider configuring a dedicated Redis instance for the read cache, with a memory limit and the eviction policy set to `allkeys-lru`.
@@ -980,21 +987,10 @@ paperless will process in parallel on a single document.
         process very large documents faster, use a higher thread per worker
         count.
 
-    The default is a balance between the two, according to your CPU core
-    count, with a slight favor towards threads per worker:
-
-    | CPU core count | Workers | Threads |
-    | -------------- | ------- | ------- |
-    | > 1            | > 1     | > 1     |
-    | > 2            | > 2     | > 1     |
-    | > 4            | > 2     | > 2     |
-    | > 6            | > 2     | > 3     |
-    | > 8            | > 2     | > 4     |
-    | > 12           | > 3     | > 4     |
-    | > 16           | > 4     | > 4     |
-
-    If you only specify PAPERLESS_TASK_WORKERS, paperless will adjust
-    PAPERLESS_THREADS_PER_WORKER automatically.
+    If unset, paperless uses `max(floor(cpu_count / PAPERLESS_TASK_WORKERS), 1)`
+    threads per worker. The idea behind this is that as long as there are enough cores,
+    the total number of threads should less than or equal to the total number of (logical)
+    CPU cores.
 
 #### [`PAPERLESS_WORKER_TIMEOUT=<num>`](#PAPERLESS_WORKER_TIMEOUT) {#PAPERLESS_WORKER_TIMEOUT}
 
@@ -1018,7 +1014,7 @@ still perform some basic text pre-processing before matching.
 
 : See also `PAPERLESS_NLTK_DIR`.
 
-    Defaults to 1.
+    Defaults to true, enabling the feature.
 
 #### [`PAPERLESS_DATE_PARSER_LANGUAGES=<lang>`](#PAPERLESS_DATE_PARSER_LANGUAGES) {#PAPERLESS_DATE_PARSER_LANGUAGES}
 
@@ -1065,17 +1061,27 @@ should be a valid crontab(5) expression describing when to run.
 
 #### [`PAPERLESS_SANITY_TASK_CRON=<cron expression>`](#PAPERLESS_SANITY_TASK_CRON) {#PAPERLESS_SANITY_TASK_CRON}
 
-: Configures the scheduled sanity checker frequency.
+: Configures the scheduled sanity checker frequency. The value should be a
+valid crontab(5) expression describing when to run.
 
 : If set to the string "disable", the sanity checker will not run automatically.
 
     Defaults to `30 0 * * sun` or Sunday at 30 minutes past midnight.
 
+#### [`PAPERLESS_WORKFLOW_SCHEDULED_TASK_CRON=<cron expression>`](#PAPERLESS_WORKFLOW_SCHEDULED_TASK_CRON) {#PAPERLESS_WORKFLOW_SCHEDULED_TASK_CRON}
+
+: Configures the scheduled workflow check frequency. The value should be a
+valid crontab(5) expression describing when to run.
+
+: If set to the string "disable", scheduled workflows will not run.
+
+    Defaults to `5 */1 * * *` or every hour at 5 minutes past the hour.
+
 #### [`PAPERLESS_ENABLE_COMPRESSION=<bool>`](#PAPERLESS_ENABLE_COMPRESSION) {#PAPERLESS_ENABLE_COMPRESSION}
 
 : Enables compression of the responses from the webserver.
 
-: Defaults to 1, enabling compression.
+: Defaults to true, enabling compression.
 
     !!! note
 
@@ -1324,6 +1330,30 @@ generate multiple events for a single file, leading to multiple
 consumers working on the same file. Configure this to prevent that.
 
     Defaults to 0.5 seconds.
+
+## Workflow webhooks
+
+#### [`PAPERLESS_WEBHOOKS_ALLOWED_SCHEMES=<str>`](#PAPERLESS_WEBHOOKS_ALLOWED_SCHEMES) {#PAPERLESS_WEBHOOKS_ALLOWED_SCHEMES}
+
+: A comma-separated list of allowed schemes for webhooks. This setting
+controls which URL schemes are permitted for webhook URLs.
+
+    Defaults to `http,https`.
+
+#### [`PAPERLESS_WEBHOOKS_ALLOWED_PORTS=<str>`](#PAPERLESS_WEBHOOKS_ALLOWED_PORTS) {#PAPERLESS_WEBHOOKS_ALLOWED_PORTS}
+
+: A comma-separated list of allowed ports for webhooks. This setting
+controls which ports are permitted for webhook URLs. For example, if you
+set this to `80,443`, webhooks will only be sent to URLs that use these
+ports.
+
+    Defaults to empty list, which allows all ports.
+
+#### [`PAPERLESS_WEBHOOKS_ALLOW_INTERNAL_REQUESTS=<bool>`](#PAPERLESS_WEBHOOKS_ALLOW_INTERNAL_REQUESTS) {#PAPERLESS_WEBHOOKS_ALLOW_INTERNAL_REQUESTS}
+
+: If set to false, webhooks cannot be sent to internal URLs (e.g., localhost).
+
+    Defaults to true, which allows internal requests.
 
 ## Incoming Mail {#incoming_mail}
 
@@ -1735,6 +1765,11 @@ started by the container.
 
 : Path to an image file in the /media/logo directory, must include 'logo', e.g. `/logo/Atari_logo.svg`
 
+!!! note
+
+    The logo file will be viewable by anyone with access to the Paperless instance login page,
+    so consider your choice of logo carefully and removing exif data from images before uploading.
+
 #### [`PAPERLESS_ENABLE_UPDATE_CHECK=<bool>`](#PAPERLESS_ENABLE_UPDATE_CHECK) {#PAPERLESS_ENABLE_UPDATE_CHECK}
 
 !!! note
@@ -1776,3 +1811,87 @@ password. All of these options come from their similarly-named [Django settings]
 #### [`PAPERLESS_EMAIL_USE_SSL=<bool>`](#PAPERLESS_EMAIL_USE_SSL) {#PAPERLESS_EMAIL_USE_SSL}
 
 : Defaults to false.
+
+## Remote OCR
+
+#### [`PAPERLESS_REMOTE_OCR_ENGINE=<str>`](#PAPERLESS_REMOTE_OCR_ENGINE) {#PAPERLESS_REMOTE_OCR_ENGINE}
+
+: The remote OCR engine to use. Currently only Azure AI is supported as "azureai".
+
+    Defaults to None, which disables remote OCR.
+
+#### [`PAPERLESS_REMOTE_OCR_API_KEY=<str>`](#PAPERLESS_REMOTE_OCR_API_KEY) {#PAPERLESS_REMOTE_OCR_API_KEY}
+
+: The API key to use for the remote OCR engine.
+
+    Defaults to None.
+
+#### [`PAPERLESS_REMOTE_OCR_ENDPOINT=<str>`](#PAPERLESS_REMOTE_OCR_ENDPOINT) {#PAPERLESS_REMOTE_OCR_ENDPOINT}
+
+: The endpoint to use for the remote OCR engine. This is required for Azure AI.
+
+    Defaults to None.
+
+## AI {#ai}
+
+#### [`PAPERLESS_AI_ENABLED=<bool>`](#PAPERLESS_AI_ENABLED) {#PAPERLESS_AI_ENABLED}
+
+: Enables the AI features in Paperless. This includes the AI-based
+suggestions. This setting is required to be set to true in order to use the AI features.
+
+    Defaults to false.
+
+#### [`PAPERLESS_AI_LLM_EMBEDDING_BACKEND=<str>`](#PAPERLESS_AI_LLM_EMBEDDING_BACKEND) {#PAPERLESS_AI_LLM_EMBEDDING_BACKEND}
+
+: The embedding backend to use for RAG. This can be either "openai" or "huggingface".
+
+    Defaults to None.
+
+#### [`PAPERLESS_AI_LLM_EMBEDDING_MODEL=<str>`](#PAPERLESS_AI_LLM_EMBEDDING_MODEL) {#PAPERLESS_AI_LLM_EMBEDDING_MODEL}
+
+: The model to use for the embedding backend for RAG. This can be set to any of the embedding models supported by the current embedding backend. If not supplied, defaults to "text-embedding-3-small" for OpenAI and "sentence-transformers/all-MiniLM-L6-v2" for Huggingface.
+
+    Defaults to None.
+
+#### [`PAPERLESS_AI_LLM_BACKEND=<str>`](#PAPERLESS_AI_LLM_BACKEND) {#PAPERLESS_AI_LLM_BACKEND}
+
+: The AI backend to use. This can be either "openai" or "ollama". If set to "ollama", the AI
+features will be run locally on your machine. If set to "openai", the AI features will be run
+using the OpenAI API. This setting is required to be set to use the AI features.
+
+    Defaults to None.
+
+    !!! note
+
+        The OpenAI API is a paid service. You will need to set up an OpenAI account and
+        will be charged for usage incurred by Paperless-ngx features and your document data
+        will (of course) be sent to the OpenAI API. Paperless-ngx does not endorse the use of the
+        OpenAI API in any way.
+
+        Refer to the OpenAI terms of service, and use at your own risk.
+
+#### [`PAPERLESS_AI_LLM_MODEL=<str>`](#PAPERLESS_AI_LLM_MODEL) {#PAPERLESS_AI_LLM_MODEL}
+
+: The model to use for the AI backend, i.e. "gpt-3.5-turbo", "gpt-4" or any of the models supported by the
+current backend. If not supplied, defaults to "gpt-3.5-turbo" for OpenAI and "llama3" for Ollama.
+
+    Defaults to None.
+
+#### [`PAPERLESS_AI_LLM_API_KEY=<str>`](#PAPERLESS_AI_LLM_API_KEY) {#PAPERLESS_AI_LLM_API_KEY}
+
+: The API key to use for the AI backend. This is required for the OpenAI backend (optional for others).
+
+    Defaults to None.
+
+#### [`PAPERLESS_AI_LLM_ENDPOINT=<str>`](#PAPERLESS_AI_LLM_ENDPOINT) {#PAPERLESS_AI_LLM_ENDPOINT}
+
+: The endpoint / url to use for the AI backend. This is required for the Ollama backend (optional for others).
+
+    Defaults to None.
+
+#### [`PAPERLESS_AI_LLM_INDEX_TASK_CRON=<cron expression>`](#PAPERLESS_AI_LLM_INDEX_TASK_CRON) {#PAPERLESS_AI_LLM_INDEX_TASK_CRON}
+
+: Configures the schedule to update the AI embeddings of text content and metadata for all documents. Only performed if
+AI is enabled and the LLM embedding backend is set.
+
+    Defaults to `10 2 * * *`, once per day.

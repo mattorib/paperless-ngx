@@ -6,7 +6,6 @@ from unittest import mock
 import pytest
 from celery.schedules import crontab
 
-from paperless.settings import _ocr_to_dateparser_languages
 from paperless.settings import _parse_base_paths
 from paperless.settings import _parse_beat_schedule
 from paperless.settings import _parse_dateparser_languages
@@ -161,6 +160,7 @@ class TestCeleryScheduleParsing(TestCase):
     SANITY_EXPIRE_TIME = ((7.0 * 24.0) - 1.0) * 60.0 * 60.0
     EMPTY_TRASH_EXPIRE_TIME = 23.0 * 60.0 * 60.0
     RUN_SCHEDULED_WORKFLOWS_EXPIRE_TIME = 59.0 * 60.0
+    LLM_INDEX_EXPIRE_TIME = 23.0 * 60.0 * 60.0
 
     def test_schedule_configuration_default(self):
         """
@@ -204,6 +204,13 @@ class TestCeleryScheduleParsing(TestCase):
                     "task": "documents.tasks.check_scheduled_workflows",
                     "schedule": crontab(minute="5", hour="*/1"),
                     "options": {"expires": self.RUN_SCHEDULED_WORKFLOWS_EXPIRE_TIME},
+                },
+                "Rebuild LLM index": {
+                    "task": "documents.tasks.llmindex_index",
+                    "schedule": crontab(minute=10, hour=2),
+                    "options": {
+                        "expires": self.LLM_INDEX_EXPIRE_TIME,
+                    },
                 },
             },
             schedule,
@@ -257,6 +264,13 @@ class TestCeleryScheduleParsing(TestCase):
                     "schedule": crontab(minute="5", hour="*/1"),
                     "options": {"expires": self.RUN_SCHEDULED_WORKFLOWS_EXPIRE_TIME},
                 },
+                "Rebuild LLM index": {
+                    "task": "documents.tasks.llmindex_index",
+                    "schedule": crontab(minute=10, hour=2),
+                    "options": {
+                        "expires": self.LLM_INDEX_EXPIRE_TIME,
+                    },
+                },
             },
             schedule,
         )
@@ -301,6 +315,13 @@ class TestCeleryScheduleParsing(TestCase):
                     "schedule": crontab(minute="5", hour="*/1"),
                     "options": {"expires": self.RUN_SCHEDULED_WORKFLOWS_EXPIRE_TIME},
                 },
+                "Rebuild LLM index": {
+                    "task": "documents.tasks.llmindex_index",
+                    "schedule": crontab(minute=10, hour=2),
+                    "options": {
+                        "expires": self.LLM_INDEX_EXPIRE_TIME,
+                    },
+                },
             },
             schedule,
         )
@@ -323,6 +344,7 @@ class TestCeleryScheduleParsing(TestCase):
                 "PAPERLESS_INDEX_TASK_CRON": "disable",
                 "PAPERLESS_EMPTY_TRASH_TASK_CRON": "disable",
                 "PAPERLESS_WORKFLOW_SCHEDULED_TASK_CRON": "disable",
+                "PAPERLESS_LLM_INDEX_TASK_CRON": "disable",
             },
         ):
             schedule = _parse_beat_schedule()
@@ -474,33 +496,6 @@ class TestPathSettings(TestCase):
         base_paths = _parse_base_paths()
         self.assertEqual("/paperless/", base_paths[1])  # BASE_URL
         self.assertEqual("/foobar/", base_paths[4])  # LOGOUT_REDIRECT_URL
-
-
-@pytest.mark.parametrize(
-    ("ocr_language", "expected"),
-    [
-        # One language
-        ("eng", ["en"]),
-        # Multiple languages
-        ("fra+ita+lao", ["fr", "it", "lo"]),
-        # Languages that don't have a two-letter equivalent
-        ("fil", ["fil"]),
-        # Languages with a script part supported by dateparser
-        ("aze_cyrl+srp_latn", ["az-Cyrl", "sr-Latn"]),
-        # Languages with a script part not supported by dateparser
-        # In this case, default to the language without script
-        ("deu_frak", ["de"]),
-        # Traditional and simplified chinese don't have the same name in dateparser,
-        # so they're converted to the general chinese language
-        ("chi_tra+chi_sim", ["zh"]),
-        # If a language is not supported by dateparser, fallback to the supported ones
-        ("eng+unsupported_language+por", ["en", "pt"]),
-        # If no language is supported, fallback to default
-        ("unsupported1+unsupported2", []),
-    ],
-)
-def test_ocr_to_dateparser_languages(ocr_language, expected):
-    assert sorted(_ocr_to_dateparser_languages(ocr_language)) == sorted(expected)
 
 
 @pytest.mark.parametrize(

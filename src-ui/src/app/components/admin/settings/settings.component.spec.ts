@@ -28,7 +28,6 @@ import { IfOwnerDirective } from 'src/app/directives/if-owner.directive'
 import { IfPermissionsDirective } from 'src/app/directives/if-permissions.directive'
 import { PermissionsGuard } from 'src/app/guards/permissions.guard'
 import { CustomDatePipe } from 'src/app/pipes/custom-date.pipe'
-import { SafeHtmlPipe } from 'src/app/pipes/safehtml.pipe'
 import { PermissionsService } from 'src/app/services/permissions.service'
 import { GroupService } from 'src/app/services/rest/group.service'
 import { SavedViewService } from 'src/app/services/rest/saved-view.service'
@@ -60,6 +59,43 @@ const groups = [
   { id: 1, name: 'group1' },
   { id: 2, name: 'group2' },
 ]
+
+const status: SystemStatus = {
+  pngx_version: '2.4.3',
+  server_os: 'macOS-14.1.1-arm64-arm-64bit',
+  install_type: InstallType.BareMetal,
+  storage: { total: 494384795648, available: 13573525504 },
+  database: {
+    type: 'sqlite',
+    url: '/paperless-ngx/data/db.sqlite3',
+    status: SystemStatusItemStatus.ERROR,
+    error: null,
+    migration_status: {
+      latest_migration: 'socialaccount.0006_alter_socialaccount_extra_data',
+      unapplied_migrations: [],
+    },
+  },
+  tasks: {
+    redis_url: 'redis://localhost:6379',
+    redis_status: SystemStatusItemStatus.ERROR,
+    redis_error: 'Error 61 connecting to localhost:6379. Connection refused.',
+    celery_status: SystemStatusItemStatus.ERROR,
+    celery_url: 'celery@localhost',
+    celery_error: 'Error connecting to celery@localhost',
+    index_status: SystemStatusItemStatus.OK,
+    index_last_modified: new Date().toISOString(),
+    index_error: null,
+    classifier_status: SystemStatusItemStatus.OK,
+    classifier_last_trained: new Date().toISOString(),
+    classifier_error: null,
+    sanity_check_status: SystemStatusItemStatus.ERROR,
+    sanity_check_last_run: new Date().toISOString(),
+    sanity_check_error: 'Error running sanity check.',
+    llmindex_status: SystemStatusItemStatus.DISABLED,
+    llmindex_last_modified: new Date().toISOString(),
+    llmindex_error: null,
+  },
+}
 
 describe('SettingsComponent', () => {
   let component: SettingsComponent
@@ -95,7 +131,6 @@ describe('SettingsComponent', () => {
         ConfirmDialogComponent,
         CheckComponent,
         ColorComponent,
-        SafeHtmlPipe,
         SelectComponent,
         TextComponent,
         NumberComponent,
@@ -290,40 +325,6 @@ describe('SettingsComponent', () => {
   })
 
   it('should load system status on initialize, show errors if needed', () => {
-    const status: SystemStatus = {
-      pngx_version: '2.4.3',
-      server_os: 'macOS-14.1.1-arm64-arm-64bit',
-      install_type: InstallType.BareMetal,
-      storage: { total: 494384795648, available: 13573525504 },
-      database: {
-        type: 'sqlite',
-        url: '/paperless-ngx/data/db.sqlite3',
-        status: SystemStatusItemStatus.ERROR,
-        error: null,
-        migration_status: {
-          latest_migration: 'socialaccount.0006_alter_socialaccount_extra_data',
-          unapplied_migrations: [],
-        },
-      },
-      tasks: {
-        redis_url: 'redis://localhost:6379',
-        redis_status: SystemStatusItemStatus.ERROR,
-        redis_error:
-          'Error 61 connecting to localhost:6379. Connection refused.',
-        celery_status: SystemStatusItemStatus.ERROR,
-        celery_url: 'celery@localhost',
-        celery_error: 'Error connecting to celery@localhost',
-        index_status: SystemStatusItemStatus.OK,
-        index_last_modified: new Date().toISOString(),
-        index_error: null,
-        classifier_status: SystemStatusItemStatus.OK,
-        classifier_last_trained: new Date().toISOString(),
-        classifier_error: null,
-        sanity_check_status: SystemStatusItemStatus.ERROR,
-        sanity_check_last_run: new Date().toISOString(),
-        sanity_check_error: 'Error running sanity check.',
-      },
-    }
     jest.spyOn(systemStatusService, 'get').mockReturnValue(of(status))
     jest.spyOn(permissionsService, 'isAdmin').mockReturnValue(true)
     completeSetup()
@@ -340,6 +341,8 @@ describe('SettingsComponent', () => {
 
   it('should open system status dialog', () => {
     const modalOpenSpy = jest.spyOn(modalService, 'open')
+    jest.spyOn(systemStatusService, 'get').mockReturnValue(of(status))
+    jest.spyOn(permissionsService, 'isAdmin').mockReturnValue(true)
     completeSetup()
     component.showSystemStatus()
     expect(modalOpenSpy).toHaveBeenCalledWith(SystemStatusDialogComponent, {

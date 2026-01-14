@@ -8,16 +8,14 @@ import os
 import tempfile
 from os import PathLike
 from pathlib import Path
-from platform import machine
 from typing import Final
 from urllib.parse import urlparse
 
 from celery.schedules import crontab
+from compression_middleware.middleware import CompressionMiddleware
 from dateparser.languages.loader import LocaleDataLoader
 from django.utils.translation import gettext_lazy as _
 from dotenv import load_dotenv
-
-from paperless.utils import ocr_to_dateparser_languages
 
 logger = logging.getLogger("paperless.settings")
 
@@ -232,6 +230,17 @@ def _parse_beat_schedule() -> dict:
                 "expires": 59.0 * 60.0,
             },
         },
+        {
+            "name": "Rebuild LLM index",
+            "env_key": "PAPERLESS_LLM_INDEX_TASK_CRON",
+            # Default daily at 02:10
+            "env_default": "10 2 * * *",
+            "task": "documents.tasks.llmindex_index",
+            "options": {
+                # 1 hour before default schedule sends again
+                "expires": 23.0 * 60.0 * 60.0,
+            },
+        },
     ]
     for task in tasks:
         # Either get the environment setting or use the default
@@ -290,6 +299,7 @@ MODEL_FILE = __get_path(
     "PAPERLESS_MODEL_FILE",
     DATA_DIR / "classification_model.pickle",
 )
+LLM_INDEX_DIR = DATA_DIR / "llm_index"
 
 LOGGING_DIR = __get_path("PAPERLESS_LOGGING_DIR", DATA_DIR / "log")
 
@@ -324,6 +334,7 @@ INSTALLED_APPS = [
     "paperless_tesseract.apps.PaperlessTesseractConfig",
     "paperless_text.apps.PaperlessTextConfig",
     "paperless_mail.apps.PaperlessMailConfig",
+    "paperless_remote.apps.PaperlessRemoteParserConfig",
     "django.contrib.admin",
     "rest_framework",
     "rest_framework.authtoken",
@@ -336,6 +347,7 @@ INSTALLED_APPS = [
     "allauth.mfa",
     "drf_spectacular",
     "drf_spectacular_sidecar",
+    "treenode",
     *env_apps,
 ]
 
@@ -381,6 +393,19 @@ MIDDLEWARE = [
 if __get_boolean("PAPERLESS_ENABLE_COMPRESSION", "yes"):  # pragma: no cover
     MIDDLEWARE.insert(0, "compression_middleware.middleware.CompressionMiddleware")
 
+# Workaround to not compress streaming responses (e.g. chat).
+# See https://github.com/friedelwolff/django-compression-middleware/pull/7
+original_process_response = CompressionMiddleware.process_response
+
+
+def patched_process_response(self, request, response):
+    if getattr(request, "compress_exempt", False):
+        return response
+    return original_process_response(self, request, response)
+
+
+CompressionMiddleware.process_response = patched_process_response
+
 ROOT_URLCONF = "paperless.urls"
 
 
@@ -424,14 +449,9 @@ ASGI_APPLICATION = "paperless.asgi.application"
 STATIC_URL = os.getenv("PAPERLESS_STATIC_URL", BASE_URL + "static/")
 WHITENOISE_STATIC_PREFIX = "/static/"
 
-if machine().lower() == "aarch64":  # pragma: no cover
-    _static_backend = "django.contrib.staticfiles.storage.StaticFilesStorage"
-else:
-    _static_backend = "whitenoise.storage.CompressedStaticFilesStorage"
-
 STORAGES = {
     "staticfiles": {
-        "BACKEND": _static_backend,
+        "BACKEND": "whitenoise.storage.CompressedStaticFilesStorage",
     },
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
 }
@@ -591,6 +611,10 @@ X_FRAME_OPTIONS = "SAMEORIGIN"
 # The next 3 settings can also be set using just PAPERLESS_URL
 CSRF_TRUSTED_ORIGINS = __get_list("PAPERLESS_CSRF_TRUSTED_ORIGINS")
 
+if DEBUG:
+    # Allow access from the angular development server during debugging
+    CSRF_TRUSTED_ORIGINS.append("http://localhost:4200")
+
 # We allow CORS from localhost:8000
 CORS_ALLOWED_ORIGINS = __get_list(
     "PAPERLESS_CORS_ALLOWED_HOSTS",
@@ -600,6 +624,8 @@ CORS_ALLOWED_ORIGINS = __get_list(
 if DEBUG:
     # Allow access from the angular development server during debugging
     CORS_ALLOWED_ORIGINS.append("http://localhost:4200")
+
+CORS_ALLOW_CREDENTIALS = True
 
 CORS_EXPOSE_HEADERS = [
     "Content-Disposition",
@@ -681,7 +707,7 @@ def _parse_db_settings() -> dict:
     databases = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
-            "NAME": str(DATA_DIR / "db.sqlite3"),
+            "NAME": DATA_DIR / "db.sqlite3",
             "OPTIONS": {},
         },
     }
@@ -787,6 +813,7 @@ LANGUAGES = [
     ("fi-fi", _("Finnish")),
     ("fr-fr", _("French")),
     ("hu-hu", _("Hungarian")),
+    ("id-id", _("Indonesian")),
     ("it-it", _("Italian")),
     ("ja-jp", _("Japanese")),
     ("ko-kr", _("Korean")),
@@ -809,7 +836,7 @@ LANGUAGES = [
     ("zh-tw", _("Chinese Traditional")),
 ]
 
-LOCALE_PATHS = [str(BASE_DIR / "locale")]
+LOCALE_PATHS = [BASE_DIR / "locale"]
 
 TIME_ZONE = os.getenv("PAPERLESS_TIME_ZONE", "UTC")
 
@@ -850,21 +877,21 @@ LOGGING = {
         "file_paperless": {
             "class": "concurrent_log_handler.ConcurrentRotatingFileHandler",
             "formatter": "verbose",
-            "filename": str(LOGGING_DIR / "paperless.log"),
+            "filename": LOGGING_DIR / "paperless.log",
             "maxBytes": LOGROTATE_MAX_SIZE,
             "backupCount": LOGROTATE_MAX_BACKUPS,
         },
         "file_mail": {
             "class": "concurrent_log_handler.ConcurrentRotatingFileHandler",
             "formatter": "verbose",
-            "filename": str(LOGGING_DIR / "mail.log"),
+            "filename": LOGGING_DIR / "mail.log",
             "maxBytes": LOGROTATE_MAX_SIZE,
             "backupCount": LOGROTATE_MAX_BACKUPS,
         },
         "file_celery": {
             "class": "concurrent_log_handler.ConcurrentRotatingFileHandler",
             "formatter": "verbose",
-            "filename": str(LOGGING_DIR / "celery.log"),
+            "filename": LOGGING_DIR / "celery.log",
             "maxBytes": LOGROTATE_MAX_SIZE,
             "backupCount": LOGROTATE_MAX_BACKUPS,
         },
@@ -873,6 +900,7 @@ LOGGING = {
     "loggers": {
         "paperless": {"handlers": ["file_paperless"], "level": "DEBUG"},
         "paperless_mail": {"handlers": ["file_mail"], "level": "DEBUG"},
+        "paperless_ai": {"handlers": ["file_paperless"], "level": "DEBUG"},
         "ocrmypdf": {"handlers": ["file_paperless"], "level": "INFO"},
         "celery": {"handlers": ["file_celery"], "level": "DEBUG"},
         "kombu": {"handlers": ["file_celery"], "level": "DEBUG"},
@@ -1004,6 +1032,18 @@ THREADS_PER_WORKER = os.getenv(
 # Paperless Specific Settings                                                 #
 ###############################################################################
 
+IGNORABLE_FILES: Final[list[str]] = [
+    ".DS_Store",
+    ".DS_STORE",
+    "._*",
+    ".stfolder/*",
+    ".stversions/*",
+    ".localized/*",
+    "desktop.ini",
+    "@eaDir/*",
+    "Thumbs.db",
+]
+
 CONSUMER_POLLING = int(os.getenv("PAPERLESS_CONSUMER_POLLING", 0))
 
 CONSUMER_POLLING_DELAY = int(os.getenv("PAPERLESS_CONSUMER_POLLING_DELAY", 5))
@@ -1026,7 +1066,7 @@ CONSUMER_IGNORE_PATTERNS = list(
     json.loads(
         os.getenv(
             "PAPERLESS_CONSUMER_IGNORE_PATTERNS",
-            '[".DS_Store", ".DS_STORE", "._*", ".stfolder/*", ".stversions/*", ".localized/*", "desktop.ini", "@eaDir/*", "Thumbs.db"]',
+            json.dumps(IGNORABLE_FILES),
         ),
     ),
 )
@@ -1184,61 +1224,6 @@ DATE_ORDER = os.getenv("PAPERLESS_DATE_ORDER", "DMY")
 FILENAME_DATE_ORDER = os.getenv("PAPERLESS_FILENAME_DATE_ORDER")
 
 
-def _ocr_to_dateparser_languages(ocr_languages: str) -> list[str]:
-    """
-    Convert Tesseract OCR_LANGUAGE codes (ISO 639-2, e.g. "eng+fra", with optional scripts like "aze_Cyrl")
-    into a list of locales compatible with the `dateparser` library.
-
-    - If a script is provided (e.g., "aze_Cyrl"), attempts to use the full locale (e.g., "az-Cyrl").
-    Falls back to the base language (e.g., "az") if needed.
-    - If a language cannot be mapped or validated, it is skipped with a warning.
-    - Returns a list of valid locales, or an empty list if none could be converted.
-    """
-    ocr_to_dateparser = ocr_to_dateparser_languages()
-    loader = LocaleDataLoader()
-    result = []
-    try:
-        for ocr_language in ocr_languages.split("+"):
-            # Split into language and optional script
-            ocr_lang_part, *script = ocr_language.split("_")
-            ocr_script_part = script[0] if script else None
-
-            language_part = ocr_to_dateparser.get(ocr_lang_part)
-            if language_part is None:
-                logger.warning(
-                    f'Skipping unknown OCR language "{ocr_language}" — no dateparser equivalent.',
-                )
-                continue
-
-            # Ensure base language is supported by dateparser
-            loader.get_locale_map(locales=[language_part])
-
-            # Try to add the script part if it's supported by dateparser
-            if ocr_script_part:
-                dateparser_language = f"{language_part}-{ocr_script_part.title()}"
-                try:
-                    loader.get_locale_map(locales=[dateparser_language])
-                except Exception:
-                    logger.warning(
-                        f"Language variant '{dateparser_language}' not supported by dateparser; falling back to base language '{language_part}'. You can manually set PAPERLESS_DATE_PARSER_LANGUAGES if needed.",
-                    )
-                    dateparser_language = language_part
-            else:
-                dateparser_language = language_part
-            if dateparser_language not in result:
-                result.append(dateparser_language)
-    except Exception as e:
-        logger.warning(
-            f"Could not configure dateparser languages. Set PAPERLESS_DATE_PARSER_LANGUAGES parameter to avoid this. Detail: {e}",
-        )
-        return []
-    if not result:
-        logger.warning(
-            "Could not configure any dateparser languages from OCR_LANGUAGE — fallback to autodetection.",
-        )
-    return result
-
-
 def _parse_dateparser_languages(languages: str | None):
     language_list = languages.split("+") if languages else []
     # There is an unfixed issue in zh-Hant and zh-Hans locales in the dateparser lib.
@@ -1253,12 +1238,14 @@ def _parse_dateparser_languages(languages: str | None):
     return list(LocaleDataLoader().get_locale_map(locales=language_list))
 
 
-if os.getenv("PAPERLESS_DATE_PARSER_LANGUAGES"):
-    DATE_PARSER_LANGUAGES = _parse_dateparser_languages(
+# If not set, we will infer it at runtime
+DATE_PARSER_LANGUAGES = (
+    _parse_dateparser_languages(
         os.getenv("PAPERLESS_DATE_PARSER_LANGUAGES"),
     )
-else:
-    DATE_PARSER_LANGUAGES = _ocr_to_dateparser_languages(OCR_LANGUAGE)
+    if os.getenv("PAPERLESS_DATE_PARSER_LANGUAGES")
+    else None
+)
 
 
 # Maximum number of dates taken from document start to end to show as suggestions for
@@ -1421,3 +1408,45 @@ OUTLOOK_OAUTH_ENABLED = bool(
     and OUTLOOK_OAUTH_CLIENT_ID
     and OUTLOOK_OAUTH_CLIENT_SECRET,
 )
+
+###############################################################################
+# Webhooks
+###############################################################################
+WEBHOOKS_ALLOWED_SCHEMES = set(
+    s.lower()
+    for s in __get_list(
+        "PAPERLESS_WEBHOOKS_ALLOWED_SCHEMES",
+        ["http", "https"],
+    )
+)
+WEBHOOKS_ALLOWED_PORTS = set(
+    int(p)
+    for p in __get_list(
+        "PAPERLESS_WEBHOOKS_ALLOWED_PORTS",
+        [],
+    )
+)
+WEBHOOKS_ALLOW_INTERNAL_REQUESTS = __get_boolean(
+    "PAPERLESS_WEBHOOKS_ALLOW_INTERNAL_REQUESTS",
+    "true",
+)
+
+###############################################################################
+# Remote Parser                                                               #
+###############################################################################
+REMOTE_OCR_ENGINE = os.getenv("PAPERLESS_REMOTE_OCR_ENGINE")
+REMOTE_OCR_API_KEY = os.getenv("PAPERLESS_REMOTE_OCR_API_KEY")
+REMOTE_OCR_ENDPOINT = os.getenv("PAPERLESS_REMOTE_OCR_ENDPOINT")
+
+################################################################################
+# AI Settings                                                                  #
+################################################################################
+AI_ENABLED = __get_boolean("PAPERLESS_AI_ENABLED", "NO")
+LLM_EMBEDDING_BACKEND = os.getenv(
+    "PAPERLESS_AI_LLM_EMBEDDING_BACKEND",
+)  # "huggingface" or "openai"
+LLM_EMBEDDING_MODEL = os.getenv("PAPERLESS_AI_LLM_EMBEDDING_MODEL")
+LLM_BACKEND = os.getenv("PAPERLESS_AI_LLM_BACKEND")  # "ollama" or "openai"
+LLM_MODEL = os.getenv("PAPERLESS_AI_LLM_MODEL")
+LLM_API_KEY = os.getenv("PAPERLESS_AI_LLM_API_KEY")
+LLM_ENDPOINT = os.getenv("PAPERLESS_AI_LLM_ENDPOINT")

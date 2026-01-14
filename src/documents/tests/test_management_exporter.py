@@ -123,7 +123,7 @@ class TestExportImport(
 
         self.trigger = WorkflowTrigger.objects.create(
             type=WorkflowTrigger.WorkflowTriggerType.CONSUMPTION,
-            sources=[1],
+            sources=[str(WorkflowTrigger.DocumentSourceChoices.CONSUME_FOLDER.value)],
             filter_filename="*",
         )
         self.action = WorkflowAction.objects.create(assign_title="new title")
@@ -230,9 +230,9 @@ class TestExportImport(
 
         for element in manifest:
             if element["model"] == "documents.document":
-                fname = (
-                    self.target / element[document_exporter.EXPORTER_FILE_NAME]
-                ).as_posix()
+                fname = str(
+                    self.target / element[document_exporter.EXPORTER_FILE_NAME],
+                )
                 self.assertIsFile(fname)
                 self.assertIsFile(
                     self.target / element[document_exporter.EXPORTER_THUMBNAIL_NAME],
@@ -462,9 +462,9 @@ class TestExportImport(
 
         call_command(*args)
 
-        expected_file = (
-            self.target / f"export-{timezone.localdate().isoformat()}.zip"
-        ).as_posix()
+        expected_file = str(
+            self.target / f"export-{timezone.localdate().isoformat()}.zip",
+        )
 
         self.assertIsFile(expected_file)
 
@@ -498,9 +498,9 @@ class TestExportImport(
         ):
             call_command(*args)
 
-        expected_file = (
-            self.target / f"export-{timezone.localdate().isoformat()}.zip"
-        ).as_posix()
+        expected_file = str(
+            self.target / f"export-{timezone.localdate().isoformat()}.zip",
+        )
 
         self.assertIsFile(expected_file)
 
@@ -544,9 +544,9 @@ class TestExportImport(
 
         call_command(*args)
 
-        expected_file = (
-            self.target / f"export-{timezone.localdate().isoformat()}.zip"
-        ).as_posix()
+        expected_file = str(
+            self.target / f"export-{timezone.localdate().isoformat()}.zip",
+        )
 
         self.assertIsFile(expected_file)
         self.assertIsNotFile(existing_file)
@@ -571,7 +571,7 @@ class TestExportImport(
         with self.assertRaises(CommandError) as e:
             call_command(*args)
 
-            self.assertEqual("That path isn't a directory", str(e))
+        self.assertEqual("That path doesn't exist", str(e.exception))
 
     def test_export_target_exists_but_is_file(self):
         """
@@ -589,7 +589,7 @@ class TestExportImport(
             with self.assertRaises(CommandError) as e:
                 call_command(*args)
 
-                self.assertEqual("That path isn't a directory", str(e))
+            self.assertEqual("That path isn't a directory", str(e.exception))
 
     def test_export_target_not_writable(self):
         """
@@ -608,7 +608,10 @@ class TestExportImport(
             with self.assertRaises(CommandError) as e:
                 call_command(*args)
 
-                self.assertEqual("That path doesn't appear to be writable", str(e))
+            self.assertEqual(
+                "That path doesn't appear to be writable",
+                str(e.exception),
+            )
 
     def test_no_archive(self):
         """

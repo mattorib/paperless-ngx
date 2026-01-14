@@ -28,6 +28,7 @@ import localeFa from '@angular/common/locales/fa'
 import localeFi from '@angular/common/locales/fi'
 import localeFr from '@angular/common/locales/fr'
 import localeHu from '@angular/common/locales/hu'
+import localeId from '@angular/common/locales/id'
 import localeIt from '@angular/common/locales/it'
 import localeJa from '@angular/common/locales/ja'
 import localeKo from '@angular/common/locales/ko'
@@ -63,6 +64,7 @@ registerLocaleData(localeFa)
 registerLocaleData(localeFi)
 registerLocaleData(localeFr)
 registerLocaleData(localeHu)
+registerLocaleData(localeId)
 registerLocaleData(localeIt)
 registerLocaleData(localeJa)
 registerLocaleData(localeKo)
@@ -121,8 +123,42 @@ if (!URL.revokeObjectURL) {
 }
 Object.defineProperty(window, 'ResizeObserver', { value: mock() })
 
+if (typeof IntersectionObserver === 'undefined') {
+  class MockIntersectionObserver {
+    constructor(
+      public callback: IntersectionObserverCallback,
+      public options?: IntersectionObserverInit
+    ) {}
+
+    observe = jest.fn()
+    unobserve = jest.fn()
+    disconnect = jest.fn()
+    takeRecords = jest.fn()
+  }
+
+  Object.defineProperty(window, 'IntersectionObserver', {
+    writable: true,
+    configurable: true,
+    value: MockIntersectionObserver,
+  })
+}
+
 HTMLCanvasElement.prototype.getContext = <
   typeof HTMLCanvasElement.prototype.getContext
 >jest.fn()
+
+if (!HTMLElement.prototype.scrollTo) {
+  HTMLElement.prototype.scrollTo = jest.fn()
+}
+
+jest.mock('uuid', () => ({
+  v4: jest.fn(() =>
+    'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char: string) => {
+      const random = Math.floor(Math.random() * 16)
+      const value = char === 'x' ? random : (random & 0x3) | 0x8
+      return value.toString(16)
+    })
+  ),
+}))
 
 jest.mock('pdfjs-dist')
