@@ -12,6 +12,14 @@ name: Sync upstream paperless-ngx
 # does not need to reapply or cherry-pick it. The only time that
 # assumption breaks is if the merge conflicts on the same Dockerfile
 # lines, which is handled below by opening an issue instead of a PR.
+#
+# All `${{ }}` expressions are passed through `env:` rather than
+# interpolated directly into `run:` scripts, and the checkout step
+# doesn't persist git credentials - the push steps authenticate the
+# origin remote explicitly and only for as long as they need to. This
+# keeps the upstream release tag name (untrusted, though GitHub-hosted)
+# out of anywhere it could be interpreted as shell/script rather than
+# plain data.
 
 on:
   schedule:
@@ -31,10 +39,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout dev
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: dev
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Configure git
         run: |
@@ -54,12 +63,16 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Fetch release tag
-        run: git fetch upstream "refs/tags/${{ steps.latest.outputs.tag }}:refs/tags/${{ steps.latest.outputs.tag }}"
+        env:
+          TAG: ${{ steps.latest.outputs.tag }}
+        run: git fetch upstream "refs/tags/$TAG:refs/tags/$TAG"
 
       - name: Check for new release
         id: check
+        env:
+          TAG: ${{ steps.latest.outputs.tag }}
         run: |
-          if git merge-base --is-ancestor "${{ steps.latest.outputs.tag }}" dev; then
+          if git merge-base --is-ancestor "$TAG" dev; then
             echo "No new upstream release."
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
@@ -68,16 +81,20 @@ jobs:
 
       - name: Create sync branch
         if: steps.check.outputs.has_changes == 'true'
+        env:
+          TAG: ${{ steps.latest.outputs.tag }}
         run: |
-          BRANCH="sync-upstream-${{ steps.latest.outputs.tag }}"
+          BRANCH="sync-upstream-$TAG"
           echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
           git checkout -b "$BRANCH"
 
       - name: Merge release tag
         if: steps.check.outputs.has_changes == 'true'
         id: merge
+        env:
+          TAG: ${{ steps.latest.outputs.tag }}
         run: |
-          if git merge "${{ steps.latest.outputs.tag }}" --no-edit; then
+          if git merge "$TAG" --no-edit; then
             echo "conflict=false" >> "$GITHUB_OUTPUT"
           else
             echo "conflict=true" >> "$GITHUB_OUTPUT"
@@ -86,41 +103,47 @@ jobs:
 
       - name: Push sync branch
         if: steps.check.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'false'
-        run: git push origin "$BRANCH"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin "$BRANCH"
 
       - name: Open pull request
         if: steps.check.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.latest.outputs.tag }}
         run: |
           gh pr create \
             --base dev \
             --head "$BRANCH" \
-            --title "Sync with upstream paperless-ngx ${{ steps.latest.outputs.tag }}" \
-            --body "Automated merge of \`paperless-ngx/paperless-ngx@${{ steps.latest.outputs.tag }}\` into this fork's \`dev\`. The jpn Tesseract-language change (b75f70c) is carried forward automatically since it's already part of \`dev\`'s history - please still skim the diff, especially around the Dockerfile's tesseract-ocr package list, before merging.
+            --title "Sync with upstream paperless-ngx $TAG" \
+            --body "Automated merge of \`paperless-ngx/paperless-ngx@$TAG\` into this fork's \`dev\`. The jpn Tesseract-language change (b75f70c) is carried forward automatically since it's already part of \`dev\`'s history - please still skim the diff, especially around the Dockerfile's tesseract-ocr package list, before merging.
 
-            Release notes: https://github.com/paperless-ngx/paperless-ngx/releases/tag/${{ steps.latest.outputs.tag }}"
+          Release notes: https://github.com/paperless-ngx/paperless-ngx/releases/tag/$TAG"
 
       - name: Open conflict issue
         if: steps.check.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.latest.outputs.tag }}
         run: |
           gh issue create \
-            --title "Manual merge needed: upstream ${{ steps.latest.outputs.tag }} sync conflicts with jpn Dockerfile change" \
-            --body "The scheduled upstream sync couldn't merge \`paperless-ngx/paperless-ngx@${{ steps.latest.outputs.tag }}\` cleanly - most likely a conflict in the Dockerfile's tesseract-ocr package list where the jpn change lives. Resolve by hand:
+            --title "Manual merge needed: upstream $TAG sync conflicts with jpn Dockerfile change" \
+            --body "The scheduled upstream sync couldn't merge \`paperless-ngx/paperless-ngx@$TAG\` cleanly - most likely a conflict in the Dockerfile's tesseract-ocr package list where the jpn change lives. Resolve by hand:
 
-            \`\`\`
-            git checkout dev
-            git remote add upstream https://github.com/paperless-ngx/paperless-ngx.git 2>/dev/null || true
-            git fetch upstream tag ${{ steps.latest.outputs.tag }}
-            git checkout -b sync-upstream-${{ steps.latest.outputs.tag }}
-            git merge ${{ steps.latest.outputs.tag }}
-            # Resolve conflicts, keeping tesseract-ocr-jpn active and
-            # tesseract-ocr-deu/fra/ita/spa commented out in the Dockerfile.
-            git add -A
-            git commit
-            git push origin sync-upstream-${{ steps.latest.outputs.tag }}
-            \`\`\`
+          \`\`\`
+          git checkout dev
+          git remote add upstream https://github.com/paperless-ngx/paperless-ngx.git 2>/dev/null || true
+          git fetch upstream tag $TAG
+          git checkout -b sync-upstream-$TAG
+          git merge $TAG
+          # Resolve conflicts, keeping tesseract-ocr-jpn active and
+          # tesseract-ocr-deu/fra/ita/spa commented out in the Dockerfile.
+          git add -A
+          git commit
+          git push origin sync-upstream-$TAG
+          \`\`\`
 
-            Then open a PR from \`sync-upstream-${{ steps.latest.outputs.tag }}\` into \`dev\`."
+          Then open a PR from \`sync-upstream-$TAG\` into \`dev\`."
