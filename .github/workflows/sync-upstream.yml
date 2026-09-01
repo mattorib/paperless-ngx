@@ -1,0 +1,135 @@
+name: Sync upstream paperless-ngx
+# Periodically merges paperless-ngx/paperless-ngx's latest stable release
+# tag into this fork's dev branch and opens a PR for review, instead of
+# committing directly. Tracking the latest release (rather than the
+# upstream dev branch tip) means we only pick up tagged, stable code -
+# published pre-releases (beta/rc) are excluded automatically since the
+# GitHub releases "latest" API only returns non-draft, non-prerelease
+# releases. Because the jpn Tesseract-language commit (b75f70c, "change
+# default tesseract languages to include jpn") already lives in dev's
+# history, a normal merge keeps it intact automatically - this workflow
+# does not need to reapply or cherry-pick it. The only time that
+# assumption breaks is if the merge conflicts on the same Dockerfile
+# lines, which is handled below by opening an issue instead of a PR.
+#
+# All `${{ }}` expressions are passed through `env:` rather than
+# interpolated directly into `run:` scripts, and the checkout step
+# doesn't persist git credentials - the push steps authenticate the
+# origin remote explicitly and only for as long as they need to. This
+# keeps the upstream release tag name (untrusted, though GitHub-hosted)
+# out of anywhere it could be interpreted as shell/script rather than
+# plain data.
+on:
+  schedule:
+    # Every Monday at 06:00 UTC. Adjust as you like - upstream has been
+    # cutting stable releases every few days to weeks, so weekly keeps
+    # pace without checking so often that most runs are no-ops.
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: dev
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/paperless-ngx/paperless-ngx.git
+      - name: Get latest stable release tag
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="$(gh api repos/paperless-ngx/paperless-ngx/releases/latest --jq '.tag_name')"
+          echo "Latest stable upstream release: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: Fetch release tag
+        env:
+          TAG: ${{ steps.latest.outputs.tag }}
+        run: git fetch upstream "refs/tags/$TAG:refs/tags/$TAG"
+      - name: Check for new release
+        id: check
+        env:
+          TAG: ${{ steps.latest.outputs.tag }}
+        run: |
+          if git merge-base --is-ancestor "$TAG" dev; then
+            echo "No new upstream release."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create sync branch
+        if: steps.check.outputs.has_changes == 'true'
+        env:
+          TAG: ${{ steps.latest.outputs.tag }}
+        run: |
+          BRANCH="sync-upstream-$TAG"
+          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+          git checkout -b "$BRANCH"
+      - name: Merge release tag
+        if: steps.check.outputs.has_changes == 'true'
+        id: merge
+        env:
+          TAG: ${{ steps.latest.outputs.tag }}
+        run: |
+          if git merge "$TAG" --no-edit; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            git merge --abort
+          fi
+      - name: Push sync branch
+        if: steps.check.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin "$BRANCH"
+      - name: Open pull request
+        if: steps.check.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.latest.outputs.tag }}
+        run: |
+          gh pr create \
+            --base dev \
+            --head "$BRANCH" \
+            --title "Sync with upstream paperless-ngx $TAG" \
+            --body "Automated merge of \`paperless-ngx/paperless-ngx@$TAG\` into this fork's \`dev\`. The jpn Tesseract-language change (b75f70c) is carried forward automatically since it's already part of \`dev\`'s history - please still skim the diff, especially around the Dockerfile's tesseract-ocr package list, before merging.
+
+          Release notes: https://github.com/paperless-ngx/paperless-ngx/releases/tag/$TAG"
+      - name: Open conflict issue
+        if: steps.check.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.latest.outputs.tag }}
+        run: |
+          gh issue create \
+            --title "Manual merge needed: upstream $TAG sync conflicts with jpn Dockerfile change" \
+            --body "The scheduled upstream sync couldn't merge \`paperless-ngx/paperless-ngx@$TAG\` cleanly - most likely a conflict in the Dockerfile's tesseract-ocr package list where the jpn change lives. Resolve by hand:
+
+          \`\`\`
+          git checkout dev
+          git remote add upstream https://github.com/paperless-ngx/paperless-ngx.git 2>/dev/null || true
+          git fetch upstream tag $TAG
+          git checkout -b sync-upstream-$TAG
+          git merge $TAG
+          # Resolve conflicts, keeping tesseract-ocr-jpn active and
+          # tesseract-ocr-deu/fra/ita/spa commented out in the Dockerfile.
+          git add -A
+          git commit
+          git push origin sync-upstream-$TAG
+          \`\`\`
+
+          Then open a PR from \`sync-upstream-$TAG\` into \`dev\`."
