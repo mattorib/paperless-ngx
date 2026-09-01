@@ -1,5 +1,4 @@
 name: Sync upstream paperless-ngx
-
 # Periodically merges paperless-ngx/paperless-ngx's latest stable release
 # tag into this fork's dev branch and opens a PR for review, instead of
 # committing directly. Tracking the latest release (rather than the
@@ -20,7 +19,6 @@ name: Sync upstream paperless-ngx
 # keeps the upstream release tag name (untrusted, though GitHub-hosted)
 # out of anywhere it could be interpreted as shell/script rather than
 # plain data.
-
 on:
   schedule:
     # Every Monday at 06:00 UTC. Adjust as you like - upstream has been
@@ -28,12 +26,10 @@ on:
     # pace without checking so often that most runs are no-ops.
     - cron: "0 6 * * 1"
   workflow_dispatch: {}
-
 permissions:
   contents: write
   pull-requests: write
   issues: write
-
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -44,15 +40,12 @@ jobs:
           ref: dev
           fetch-depth: 0
           persist-credentials: false
-
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
       - name: Add upstream remote
         run: git remote add upstream https://github.com/paperless-ngx/paperless-ngx.git
-
       - name: Get latest stable release tag
         id: latest
         env:
@@ -61,12 +54,10 @@ jobs:
           TAG="$(gh api repos/paperless-ngx/paperless-ngx/releases/latest --jq '.tag_name')"
           echo "Latest stable upstream release: $TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
       - name: Fetch release tag
         env:
           TAG: ${{ steps.latest.outputs.tag }}
         run: git fetch upstream "refs/tags/$TAG:refs/tags/$TAG"
-
       - name: Check for new release
         id: check
         env:
@@ -78,7 +69,6 @@ jobs:
           else
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Create sync branch
         if: steps.check.outputs.has_changes == 'true'
         env:
@@ -87,7 +77,6 @@ jobs:
           BRANCH="sync-upstream-$TAG"
           echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
           git checkout -b "$BRANCH"
-
       - name: Merge release tag
         if: steps.check.outputs.has_changes == 'true'
         id: merge
@@ -100,7 +89,6 @@ jobs:
             echo "conflict=true" >> "$GITHUB_OUTPUT"
             git merge --abort
           fi
-
       - name: Push sync branch
         if: steps.check.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'false'
         env:
@@ -108,7 +96,6 @@ jobs:
         run: |
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push origin "$BRANCH"
-
       - name: Open pull request
         if: steps.check.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'false'
         env:
@@ -122,7 +109,6 @@ jobs:
             --body "Automated merge of \`paperless-ngx/paperless-ngx@$TAG\` into this fork's \`dev\`. The jpn Tesseract-language change (b75f70c) is carried forward automatically since it's already part of \`dev\`'s history - please still skim the diff, especially around the Dockerfile's tesseract-ocr package list, before merging.
 
           Release notes: https://github.com/paperless-ngx/paperless-ngx/releases/tag/$TAG"
-
       - name: Open conflict issue
         if: steps.check.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'true'
         env:
