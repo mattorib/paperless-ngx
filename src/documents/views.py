@@ -180,6 +180,7 @@ from documents.permissions import has_system_status_permission
 from documents.permissions import permitted_document_ids
 from documents.permissions import permitted_object_ids
 from documents.permissions import set_permissions_for_object
+from documents.permissions import user_is_unrestricted
 from documents.plugins.date_parsing import get_date_parser
 from documents.schema import generate_object_with_permissions_schema
 from documents.search import SearchHit
@@ -577,13 +578,19 @@ class CorrespondentViewSet(
     def list(self, request, *args, **kwargs):
         if request.query_params.get("last_correspondence", None):
             self.queryset = self.queryset.annotate(
-                last_correspondence=Max("documents__created"),
+                last_correspondence=Max(
+                    "documents__created",
+                    filter=self.get_document_count_filter(),
+                ),
             )
         return super().list(request, *args, **kwargs)
 
     def retrieve(self, request, *args, **kwargs):
         self.queryset = self.queryset.annotate(
-            last_correspondence=Max("documents__created"),
+            last_correspondence=Max(
+                "documents__created",
+                filter=self.get_document_count_filter(),
+            ),
         )
         return super().retrieve(request, *args, **kwargs)
 
@@ -635,7 +642,9 @@ class TagViewSet(PermissionsAwareDocumentCountMixin, ModelViewSet[Tag]):
                 annotate_document_count_for_related_queryset(
                     Tag.objects.filter(
                         pk__in=descendant_pks | {t.pk for t in all_tags},
-                    ).select_related("owner"),
+                    )
+                    .filter(pk__in=permitted_object_ids(user, Tag, "view_tag"))
+                    .select_related("owner"),
                     through_model=self.document_count_through,
                     related_object_field=self._get_document_count_source_field(),
                     user=user,
@@ -2321,10 +2330,12 @@ class ChatStreamingView(GenericAPIView[Any]):
                 return HttpResponseForbidden("Insufficient permissions")
 
             documents = Document.objects.filter(pk=document.pk)
+            unrestricted = False
         else:
             documents = Document.objects.filter(
                 id__in=permitted_document_ids(request.user),
             )
+            unrestricted = user_is_unrestricted(request.user)
 
         output_language = get_llm_output_language(
             ai_config=ai_config,
@@ -2335,6 +2346,7 @@ class ChatStreamingView(GenericAPIView[Any]):
             stream_chat_with_documents(
                 query_str=question,
                 documents=documents,
+                unrestricted=unrestricted,
                 output_language=output_language,
             ),
             content_type="text/event-stream",
@@ -4571,6 +4583,10 @@ class ShareLinkViewSet(
 class ShareLinkBundleViewSet(PassUserMixin, ModelViewSet[ShareLinkBundle]):
     model = ShareLinkBundle
 
+    # Bundles are immutable once created; rebuild via the dedicated action
+    # rather than PUT/PATCH.
+    http_method_names = ["get", "post", "delete", "head", "options"]
+
     queryset = ShareLinkBundle.objects.all()
 
     serializer_class = ShareLinkBundleSerializer
@@ -4705,12 +4721,15 @@ class SharedLinkView(View):
                 and share_link.expiration < timezone.now()
             ):
                 return HttpResponseRedirect("/accounts/login/?sharelink_expired=1")
-            return serve_file(
-                doc=share_link.document,
-                use_archive=share_link.file_version == ShareLink.FileVersion.ARCHIVE
-                and share_link.document.has_archive_version,
-                disposition="inline",
-            )
+            try:
+                return serve_file(
+                    doc=share_link.document,
+                    use_archive=share_link.file_version == ShareLink.FileVersion.ARCHIVE
+                    and share_link.document.has_archive_version,
+                    disposition="inline",
+                )
+            except FileNotFoundError:
+                return HttpResponseRedirect("/accounts/login/?sharelink_notfound=1")
 
         bundle = ShareLinkBundle.objects.filter(slug=slug).first()
         if bundle is None:
@@ -4732,7 +4751,11 @@ class SharedLinkView(View):
 
         file_path = bundle.absolute_file_path
 
-        if bundle.status == ShareLinkBundle.Status.FAILED or file_path is None:
+        if (
+            bundle.status == ShareLinkBundle.Status.FAILED
+            or file_path is None
+            or not file_path.exists()
+        ):
             return HttpResponse(
                 _(
                     "The share link bundle is unavailable.",
