@@ -25,11 +25,15 @@ name: Sync upstream paperless-ngx
 # hard-coded GitHub restriction (there's no `workflows` permission key
 # for GITHUB_TOKEN, unlike a PAT's `workflow` OAuth scope). Since
 # upstream releases sometimes touch its own workflow files, the push
-# step falls back to a PAT stored in the optional SYNC_PAT secret
-# (classic PAT with `repo` + `workflow` scopes, or a fine-grained PAT
-# with Contents: write + Workflows: write on this repo) when one is
-# configured, and otherwise uses GITHUB_TOKEN - which still works for
-# most releases that don't change workflow files.
+# and PR-creation steps fall back to a PAT stored in the optional
+# SYNC_PAT secret (classic PAT with `repo` + `workflow` scopes, or a
+# fine-grained PAT with Contents: write + Workflows: write + Pull
+# requests: write on this repo) when one is configured, and otherwise
+# use GITHUB_TOKEN - which still works for most releases that don't
+# change workflow files, as long as this repo's Settings > Actions >
+# General > Workflow permissions has "Allow GitHub Actions to create
+# and approve pull requests" enabled (GITHUB_TOKEN can't open PRs
+# without it, separately from the push restriction above).
 on:
   schedule:
     # Every Monday at 06:00 UTC. Adjust as you like - upstream has been
@@ -110,7 +114,7 @@ jobs:
       - name: Open pull request
         if: steps.check.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'false'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.latest.outputs.tag }}
         run: |
           gh pr create \
