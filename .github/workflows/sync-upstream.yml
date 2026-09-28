@@ -117,14 +117,17 @@ jobs:
           GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.latest.outputs.tag }}
         run: |
-          # GitHub's API can take a moment to see a branch just pushed
-          # (read-after-write lag), which makes pr create fail with
-          # "No commits between dev and $BRANCH" even though the push
-          # succeeded - retry a few times before giving up.
+          # GitHub's PR-creation API can lag well behind the git ref
+          # store after a branch is pushed (observed up to ~90s, worse
+          # right after a same-named branch was just deleted), so
+          # pr create fails with "No commits between dev and $BRANCH"
+          # even though the push already succeeded. Retry with a long
+          # enough window to ride that out - this workflow runs at
+          # most weekly, so a few extra minutes here is cheap.
           BODY="Automated merge of \`paperless-ngx/paperless-ngx@$TAG\` into this fork's \`dev\`. The jpn Tesseract-language change (b75f70c) is carried forward automatically since it's already part of \`dev\`'s history - please still skim the diff, especially around the Dockerfile's tesseract-ocr package list, before merging.
 
           Release notes: https://github.com/paperless-ngx/paperless-ngx/releases/tag/$TAG"
-          for attempt in 1 2 3 4 5; do
+          for attempt in $(seq 1 12); do
             if gh pr create \
               --base dev \
               --head "$BRANCH" \
@@ -132,8 +135,8 @@ jobs:
               --body "$BODY"; then
               exit 0
             fi
-            echo "gh pr create failed (attempt $attempt/5), retrying in 5s..."
-            sleep 5
+            echo "gh pr create failed (attempt $attempt/12), retrying in 15s..."
+            sleep 15
           done
           exit 1
       - name: Open conflict issue
