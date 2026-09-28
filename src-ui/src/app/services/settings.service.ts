@@ -2,6 +2,8 @@ import { HttpClient } from '@angular/common/http'
 import {
   DOCUMENT,
   EventEmitter,
+  Signal,
+  computed,
   inject,
   Injectable,
   LOCALE_ID,
@@ -22,6 +24,7 @@ import { DEFAULT_DISPLAY_FIELDS, DisplayField } from '../data/document'
 import { RemoteOCRModeConfig } from '../data/paperless-config'
 import { SavedView } from '../data/saved-view'
 import {
+  HideableSidebarItemID,
   PAPERLESS_GREEN_HEX,
   SETTINGS,
   SETTINGS_KEYS,
@@ -297,6 +300,7 @@ export class SettingsService {
 
   private settings: Record<string, any> = {}
   private readonly settingsVersion = signal(0)
+  private readonly settingSignals = new Map<string, Signal<unknown>>()
   readonly currentUser = signal<User>(undefined)
 
   public settingsSaved: EventEmitter<any> = new EventEmitter()
@@ -310,6 +314,18 @@ export class SettingsService {
   readonly globalDropzoneEnabled = signal(true)
   readonly globalDropzoneActive = signal(false)
   readonly organizingSidebarSavedViews = signal(false)
+  readonly sidebarHiddenItemsEditing = signal<HideableSidebarItemID[] | null>(
+    null
+  )
+  readonly organizingSidebarItems = computed(
+    () => this.sidebarHiddenItemsEditing() !== null
+  )
+  readonly sidebarHiddenItemsEditingChanged = new EventEmitter<
+    HideableSidebarItemID[]
+  >()
+  readonly hiddenSidebarItems = this.getSignal<HideableSidebarItemID[]>(
+    SETTINGS_KEYS.SIDEBAR_HIDDEN_ITEMS
+  )
 
   readonly allDisplayFields = signal<Array<{ id: DisplayField; name: string }>>(
     DEFAULT_DISPLAY_FIELDS
@@ -326,10 +342,6 @@ export class SettingsService {
     return !UNSAFE_OBJECT_KEYS.has(key)
   }
 
-  public trackChanges(): void {
-    this.settingsVersion()
-  }
-
   private assignSafeSettings(source: Record<string, any>) {
     if (!source || typeof source !== 'object' || Array.isArray(source)) {
       return
@@ -339,6 +351,7 @@ export class SettingsService {
       if (!this.isSafeObjectKey(key)) continue
       this.settings[key] = source[key]
     }
+    this.settingsVersion.update((version) => version + 1)
   }
 
   // this is called by the app initializer in app.module
@@ -594,6 +607,18 @@ export class SettingsService {
     }
   }
 
+  getSignal<T = any>(key: string): Signal<T> {
+    let settingSignal = this.settingSignals.get(key)
+    if (!settingSignal) {
+      settingSignal = computed(() => {
+        this.settingsVersion()
+        return this.get(key)
+      })
+      this.settingSignals.set(key, settingSignal)
+    }
+    return settingSignal as Signal<T>
+  }
+
   set(key: string, value: any) {
     // parse key:key:key into nested object
     let settingObj = this.settings
@@ -735,6 +760,29 @@ export class SettingsService {
       ...new Set(sidebarViews.map((v) => v.id)),
     ])
     return this.storeSettings()
+  }
+
+  sidebarItemIsHidden(item: HideableSidebarItemID): boolean {
+    return (
+      this.sidebarHiddenItemsEditing() ?? this.hiddenSidebarItems()
+    ).includes(item)
+  }
+
+  updateSidebarItemVisibility(
+    item: HideableSidebarItemID,
+    visible: boolean
+  ): void {
+    const hiddenItems = new Set(
+      this.sidebarHiddenItemsEditing() ?? this.hiddenSidebarItems()
+    )
+    if (visible) {
+      hiddenItems.delete(item)
+    } else {
+      hiddenItems.add(item)
+    }
+    const updatedHiddenItems = [...hiddenItems]
+    this.sidebarHiddenItemsEditing.set(updatedHiddenItems)
+    this.sidebarHiddenItemsEditingChanged.emit(updatedHiddenItems)
   }
 
   updateSavedViewsVisibility(

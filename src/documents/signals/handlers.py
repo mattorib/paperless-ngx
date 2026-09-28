@@ -1003,7 +1003,7 @@ def run_workflows(
 
                         # kwargs so the PaperlessTask record can note the
                         # document, see _extract_input_data
-                        apply_ai_suggestions.delay(
+                        apply_ai_suggestions.delay_on_commit(
                             action_id=action.pk,
                             document_id=document.pk,
                         )
@@ -1189,13 +1189,18 @@ def before_task_publish_handler(
         trigger_source = _determine_trigger_source(headers)
         owner_id = _extract_owner_id(task_type, task_kwargs)
 
-        PaperlessTask.objects.create(
+        # A retried task is republished with the same task_id, so this fires
+        # again for it; get_or_create keeps the original PENDING record
+        # instead of raising a duplicate-key IntegrityError on the retry.
+        PaperlessTask.objects.get_or_create(
             task_id=task_id,
-            task_type=task_type,
-            trigger_source=trigger_source,
-            status=PaperlessTask.Status.PENDING,
-            input_data=input_data,
-            owner_id=owner_id,
+            defaults={
+                "task_type": task_type,
+                "trigger_source": trigger_source,
+                "status": PaperlessTask.Status.PENDING,
+                "input_data": input_data,
+                "owner_id": owner_id,
+            },
         )
     except Exception:  # pragma: no cover
         logger.exception("Creating PaperlessTask failed")
