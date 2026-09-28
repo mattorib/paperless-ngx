@@ -28,8 +28,9 @@ import { Subject, of, throwError } from 'rxjs'
 import { routes } from 'src/app/app-routing.module'
 import { Correspondent } from 'src/app/data/correspondent'
 import { CustomFieldDataType } from 'src/app/data/custom-field'
+import { CustomFieldInstance } from 'src/app/data/custom-field-instance'
 import { DataType } from 'src/app/data/datatype'
-import { Document } from 'src/app/data/document'
+import { Document, DocumentVersionInfo } from 'src/app/data/document'
 import { DocumentType } from 'src/app/data/document-type'
 import {
   FILTER_CORRESPONDENT,
@@ -100,12 +101,17 @@ const doc: Document = {
   custom_fields: [
     {
       field: 0,
-      document: 3,
-      created: new Date(),
       value: 'custom foo bar',
     },
-  ],
+  ] as CustomFieldInstance[],
 }
+
+// Newest first, as the API returns them: 12 is the latest, 3 is the root
+const docVersions: DocumentVersionInfo[] = [
+  { id: 12, is_root: false },
+  { id: 10, is_root: false },
+  { id: doc.id, is_root: true },
+]
 
 const customFields = [
   {
@@ -1209,22 +1215,51 @@ describe('DocumentDetailComponent', () => {
     expect(fixture.debugElement.queryAll(By.css('textarea.rtl'))).not.toBeNull()
   })
 
-  it('should display built-in pdf viewer if not disabled', () => {
+  it('should display built-in pdf viewer if not disabled', async () => {
     initNormally()
-    component.document().archived_file_name = 'file.pdf'
+    component.document.update((document) => ({
+      ...document,
+      archived_file_name: 'file.pdf',
+    }))
     settingsService.set(SETTINGS_KEYS.USE_NATIVE_PDF_VIEWER, false)
     expect(component.useNativePdfViewer).toBeFalsy()
-    fixture.detectChanges()
+    await fixture.whenStable()
     expect(fixture.debugElement.query(By.css('pngx-pdf-viewer'))).not.toBeNull()
   })
 
   it('should display native pdf viewer if enabled', () => {
     initNormally()
-    component.document().archived_file_name = 'file.pdf'
+    component.document.update((document) => ({
+      ...document,
+      archived_file_name: 'file.pdf',
+    }))
     settingsService.set(SETTINGS_KEYS.USE_NATIVE_PDF_VIEWER, true)
     expect(component.useNativePdfViewer).toBeTruthy()
     fixture.detectChanges()
     expect(fixture.debugElement.query(By.css('object'))).not.toBeNull()
+  })
+
+  it('should reflect signal-backed document detail display settings', () => {
+    settingsService.set(SETTINGS_KEYS.DOCUMENT_EDITING_OVERLAY_THUMBNAIL, false)
+    settingsService.set(SETTINGS_KEYS.DOCUMENT_DETAILS_HIDDEN_FIELDS, [
+      component.DocumentDetailFieldID.Correspondent,
+    ])
+
+    expect(component.showThumbnailOverlay).toBeFalsy()
+    expect(
+      component.isFieldHidden(component.DocumentDetailFieldID.Correspondent)
+    ).toBeTruthy()
+    expect(
+      component.isFieldHidden(component.DocumentDetailFieldID.DocumentType)
+    ).toBeFalsy()
+
+    settingsService.set(SETTINGS_KEYS.DOCUMENT_EDITING_OVERLAY_THUMBNAIL, true)
+    settingsService.set(SETTINGS_KEYS.DOCUMENT_DETAILS_HIDDEN_FIELDS, [])
+
+    expect(component.showThumbnailOverlay).toBeTruthy()
+    expect(
+      component.isFieldHidden(component.DocumentDetailFieldID.Correspondent)
+    ).toBeFalsy()
   })
 
   it('should attempt to retrieve metadata', () => {
@@ -1442,6 +1477,35 @@ describe('DocumentDetailComponent', () => {
       suggested_document_types: [],
       suggested_correspondents: [],
     })
+  })
+
+  it('should not automatically get suggestions if auto-suggest is disabled', () => {
+    settingsService.set(SETTINGS_KEYS.DOCUMENT_EDITING_AUTO_SUGGEST, false)
+    const suggestionsSpy = jest.spyOn(documentService, 'getSuggestions')
+    suggestionsSpy.mockReturnValue(of({ tags: [42] }))
+    initNormally()
+    expect(suggestionsSpy).not.toHaveBeenCalled()
+
+    // still available on demand
+    component.getSuggestions()
+    expect(suggestionsSpy).toHaveBeenCalled()
+  })
+
+  it('should not automatically get AI suggestions if auto-suggest is disabled', () => {
+    settingsService.set(SETTINGS_KEYS.DOCUMENT_EDITING_AUTO_SUGGEST, false)
+    const getSetting = settingsService.get.bind(settingsService)
+    jest
+      .spyOn(settingsService, 'get')
+      .mockImplementation((key) =>
+        key === SETTINGS_KEYS.AI_ENABLED ? true : getSetting(key)
+      )
+    const aiSuggestionsSpy = jest.spyOn(documentService, 'getAiSuggestions')
+    aiSuggestionsSpy.mockReturnValue(of({ tags: [42] }))
+    initNormally()
+    expect(aiSuggestionsSpy).not.toHaveBeenCalled()
+
+    component.getSuggestions()
+    expect(aiSuggestionsSpy).toHaveBeenCalled()
   })
 
   it('should reset the suggestions loading state if the document changes mid-request', () => {
@@ -1685,7 +1749,10 @@ describe('DocumentDetailComponent', () => {
 
   it('should change preview element by render type', () => {
     initNormally()
-    component.document().archived_file_name = 'file.pdf'
+    component.document.update((document) => ({
+      ...document,
+      archived_file_name: 'file.pdf',
+    }))
     fixture.detectChanges()
     expect(component.archiveContentRenderType).toEqual(
       component.ContentRenderType.PDF
@@ -1694,8 +1761,11 @@ describe('DocumentDetailComponent', () => {
       fixture.debugElement.query(By.css('pdf-viewer-container'))
     ).not.toBeUndefined()
 
-    component.document().archived_file_name = undefined
-    component.document().mime_type = 'text/plain'
+    component.document.update((document) => ({
+      ...document,
+      archived_file_name: undefined,
+      mime_type: 'text/plain',
+    }))
     fixture.detectChanges()
     expect(component.archiveContentRenderType).toEqual(
       component.ContentRenderType.Text
@@ -1704,7 +1774,10 @@ describe('DocumentDetailComponent', () => {
       fixture.debugElement.query(By.css('div.preview-sticky'))
     ).not.toBeUndefined()
 
-    component.document().mime_type = 'image/jpeg'
+    component.document.update((document) => ({
+      ...document,
+      mime_type: 'image/jpeg',
+    }))
     fixture.detectChanges()
     expect(component.archiveContentRenderType).toEqual(
       component.ContentRenderType.Image
@@ -1712,9 +1785,12 @@ describe('DocumentDetailComponent', () => {
     expect(
       fixture.debugElement.query(By.css('.preview-sticky img'))
     ).not.toBeUndefined()
-    ;((component.document().mime_type =
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
-      fixture.detectChanges())
+    component.document.update((document) => ({
+      ...document,
+      mime_type:
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }))
+    fixture.detectChanges()
     expect(component.archiveContentRenderType).toEqual(
       component.ContentRenderType.Other
     )
@@ -1973,6 +2049,208 @@ describe('DocumentDetailComponent', () => {
     expect(component.document().versions).toEqual(updatedVersions)
     expect(openDoc.versions).toEqual(updatedVersions)
     expect(saveSpy).toHaveBeenCalled()
+  })
+
+  it('selectVersion should use the version content as the baseline and ignore stale responses', () => {
+    initNormally()
+    const version10Content = new Subject<Document>()
+    jest
+      .spyOn(documentService, 'get')
+      .mockReturnValueOnce(version10Content)
+      .mockReturnValueOnce(of({ content: 'version 12 content' } as Document))
+    const version10Metadata = new Subject<any>()
+    jest
+      .spyOn(documentService, 'getMetadata')
+      .mockReturnValueOnce(version10Metadata)
+      .mockReturnValueOnce(of({ lang: 'de' }))
+
+    component.selectVersion(10)
+    component.selectVersion(12)
+    version10Content.next({ content: 'version 10 content' } as Document)
+    version10Metadata.next({ lang: 'en' })
+
+    expect(component.documentForm.get('content').value).toEqual(
+      'version 12 content'
+    )
+    expect(component.store.value.content).toEqual('version 12 content')
+    expect(component.metadata().lang).toEqual('de')
+    expect(
+      httpTestingController.expectOne(component.previewUrl()).cancelled
+    ).toBeFalsy()
+    expect(
+      httpTestingController.match((req) => req.url.includes('version=10'))[0]
+        ?.cancelled
+    ).toBeTruthy()
+  })
+
+  it('should confirm before discarding unsaved content edits when switching versions', () => {
+    initNormally()
+    component.document().versions = docVersions
+    jest
+      .spyOn(documentService, 'get')
+      .mockImplementation((id, versionID) =>
+        of({ content: `version ${versionID} content` } as Document)
+      )
+    let openModal: NgbModalRef
+    modalService.activeInstances.subscribe((modals) => (openModal = modals[0]))
+    const modalSpy = jest.spyOn(modalService, 'open')
+
+    // shared fields carry over between versions, so no confirmation
+    component.documentForm.get('title').setValue('Edited title')
+    component.documentForm.get('title').markAsDirty()
+    component.documentForm.get('content').markAsDirty()
+    component.onVersionSelected(12)
+    expect(modalSpy).not.toHaveBeenCalled()
+    expect(component.selectedVersionId()).toEqual(12)
+
+    component.documentForm.get('content').setValue('edited content')
+    component.documentForm.get('content').markAsDirty()
+    component.onVersionSelected(12) // already selected, nothing to do
+    expect(modalSpy).not.toHaveBeenCalled()
+    component.onVersionSelected(10)
+    expect(modalSpy).toHaveBeenCalledWith(
+      ConfirmDialogComponent,
+      expect.anything()
+    )
+    openModal.componentInstance.cancel()
+    expect(component.selectedVersionId()).toEqual(12)
+    expect(component.documentForm.get('content').value).toEqual(
+      'edited content'
+    )
+
+    component.onVersionSelected(10)
+    openModal.componentInstance.confirmClicked.emit()
+    expect(component.selectedVersionId()).toEqual(10)
+    expect(component.documentForm.get('content').value).toEqual(
+      'version 10 content'
+    )
+    expect(component.documentForm.get('content').dirty).toBeFalsy()
+    expect(component.documentForm.get('title').value).toEqual('Edited title')
+  })
+
+  it('should save unsaved content edits to the current version before switching, and stay if that fails', () => {
+    initNormally()
+    component.document().versions = docVersions
+    component.selectedVersionId.set(12)
+    jest
+      .spyOn(documentService, 'get')
+      .mockReturnValue(of({ content: 'version 10 content' } as Document))
+    const savedDoc = new Subject<Document>()
+    const patchSpy = jest
+      .spyOn(documentService, 'patch')
+      .mockReturnValueOnce(throwError(() => new Error('failed to save')))
+      .mockReturnValueOnce(savedDoc)
+    const modalSpy = jest.spyOn(modalService, 'open')
+    component.documentForm.get('content').setValue('edited content')
+    component.documentForm.get('content').markAsDirty()
+
+    component.onVersionSelected(10)
+    let modal: NgbModalRef = modalSpy.mock.results[0].value
+    const closeSpy = jest.spyOn(modal, 'close')
+    modal.componentInstance.alternativeClicked.emit()
+    expect(closeSpy).toHaveBeenCalled()
+    expect(component.selectedVersionId()).toEqual(12)
+    expect(component.documentForm.get('content').value).toEqual(
+      'edited content'
+    )
+
+    component.onVersionSelected(10)
+    modal = modalSpy.mock.results[1].value
+    modal.componentInstance.alternativeClicked.emit()
+    expect(patchSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({ content: 'edited content' }),
+      12
+    )
+    component.onVersionSelected(doc.id) // ignored while saving
+    expect(modalSpy).toHaveBeenCalledTimes(2)
+    savedDoc.next(doc)
+    expect(component.selectedVersionId()).toEqual(10)
+    expect(component.documentForm.get('content').value).toEqual(
+      'version 10 content'
+    )
+  })
+
+  it('should switch without confirmation when the selected version was deleted, even while saving', () => {
+    initNormally()
+    component.document().versions = docVersions
+    component.selectedVersionId.set(10)
+    jest
+      .spyOn(documentService, 'get')
+      .mockReturnValue(of({ content: 'version 12 content' } as Document))
+    const modalSpy = jest.spyOn(modalService, 'open')
+    component.documentForm.get('content').setValue('edited content')
+    component.documentForm.get('content').markAsDirty()
+    component.networkActive.set(true)
+
+    // the version dropdown emits this after deleting the selected version
+    component.onVersionsUpdated(docVersions.filter((v) => v.id !== 10))
+    component.onVersionSelected(12)
+
+    expect(modalSpy).not.toHaveBeenCalled()
+    expect(component.selectedVersionId()).toEqual(12)
+    expect(component.documentForm.get('content').value).toEqual(
+      'version 12 content'
+    )
+  })
+
+  it('should restore the selected version and its unsaved content when returning to a document', () => {
+    initNormally()
+    const openDoc = component.document()
+    openDoc.versions = docVersions
+    jest.spyOn(openDocumentsService, 'getOpenDocument').mockReturnValue(openDoc)
+    jest
+      .spyOn(documentService, 'get')
+      .mockImplementation((id, versionID) =>
+        of(
+          (versionID
+            ? { content: `version ${versionID} content` }
+            : { ...doc, versions: docVersions }) as Document
+        )
+      )
+    component.selectVersion(10)
+    // an edit that happens to match the latest version's content
+    component.documentForm.get('content').setValue(doc.content)
+    openDoc.__changedFields = ['content']
+
+    component['loadDocument'](doc.id)
+
+    expect(component.selectedVersionId()).toEqual(10)
+    expect(component.documentForm.get('content').value).toEqual(doc.content)
+    expect(openDocumentsService.isDirty(openDoc)).toBeTruthy()
+    const patchSpy = jest
+      .spyOn(documentService, 'patch')
+      .mockReturnValue(of(doc))
+    component.save()
+    expect(patchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ content: doc.content }),
+      10
+    )
+  })
+
+  it('should fall back to the latest version when the remembered version no longer exists', () => {
+    initNormally()
+    const openDoc = component.document()
+    openDoc.versions = docVersions
+    jest.spyOn(openDocumentsService, 'getOpenDocument').mockReturnValue(openDoc)
+    jest.spyOn(documentService, 'get').mockImplementation((id, versionID) =>
+      of(
+        (versionID
+          ? { content: `version ${versionID} content` }
+          : {
+              ...doc,
+              content: 'version 12 content',
+              versions: docVersions.filter((v) => v.id !== 10),
+            }) as Document
+      )
+    )
+    component.selectVersion(10)
+
+    component['loadDocument'](doc.id)
+
+    expect(component.selectedVersionId()).toEqual(12)
+    expect(component.documentForm.get('content').value).toEqual(
+      'version 12 content'
+    )
   })
 
   it('createDisabled should return true if the user does not have permission to add the specified data type', () => {
