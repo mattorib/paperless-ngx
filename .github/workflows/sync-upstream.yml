@@ -19,6 +19,17 @@ name: Sync upstream paperless-ngx
 # keeps the upstream release tag name (untrusted, though GitHub-hosted)
 # out of anywhere it could be interpreted as shell/script rather than
 # plain data.
+#
+# GITHUB_TOKEN can never push changes to files under .github/workflows/,
+# no matter what's granted in the `permissions:` block below - it's a
+# hard-coded GitHub restriction (there's no `workflows` permission key
+# for GITHUB_TOKEN, unlike a PAT's `workflow` OAuth scope). Since
+# upstream releases sometimes touch its own workflow files, the push
+# step falls back to a PAT stored in the optional SYNC_PAT secret
+# (classic PAT with `repo` + `workflow` scopes, or a fine-grained PAT
+# with Contents: write + Workflows: write on this repo) when one is
+# configured, and otherwise uses GITHUB_TOKEN - which still works for
+# most releases that don't change workflow files.
 on:
   schedule:
     # Every Monday at 06:00 UTC. Adjust as you like - upstream has been
@@ -30,7 +41,6 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
-  workflows: write
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -93,7 +103,7 @@ jobs:
       - name: Push sync branch
         if: steps.check.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'false'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
         run: |
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push origin "$BRANCH"
