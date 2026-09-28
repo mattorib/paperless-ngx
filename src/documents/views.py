@@ -16,6 +16,7 @@ from time import mktime
 from time import sleep
 from typing import TYPE_CHECKING
 from typing import Any
+from typing import Final
 from typing import Literal
 from typing import NamedTuple
 from unicodedata import normalize
@@ -36,7 +37,6 @@ from django.db.migrations.recorder import MigrationRecorder
 from django.db.models import Avg
 from django.db.models import Case
 from django.db.models import Count
-from django.db.models import F
 from django.db.models import IntegerField
 from django.db.models import Max
 from django.db.models import Model
@@ -137,12 +137,14 @@ from documents.filters import CustomFieldFilterSet
 from documents.filters import DocumentFilterSet
 from documents.filters import DocumentsOrderingFilter
 from documents.filters import DocumentTypeFilterSet
+from documents.filters import EffectiveContentFilter
 from documents.filters import PaperlessTaskFilterSet
 from documents.filters import PermittedObjectsFilter
 from documents.filters import ShareLinkBundleFilterSet
 from documents.filters import ShareLinkFilterSet
 from documents.filters import StoragePathFilterSet
 from documents.filters import TagFilterSet
+from documents.filters import TitleContentFilter
 from documents.mail import EmailAttachment
 from documents.mail import send_email
 from documents.matching import match_correspondents
@@ -169,6 +171,7 @@ from documents.permissions import AcknowledgeTasksPermissions
 from documents.permissions import PaperlessAdminPermissions
 from documents.permissions import PaperlessNotePermissions
 from documents.permissions import PaperlessObjectPermissions
+from documents.permissions import TrashPermissions
 from documents.permissions import ViewDocumentsPermissions
 from documents.permissions import annotate_document_count_by_ids
 from documents.permissions import annotate_document_count_for_related_queryset
@@ -179,7 +182,8 @@ from documents.permissions import has_perms_owner_aware
 from documents.permissions import has_system_status_permission
 from documents.permissions import permitted_document_ids
 from documents.permissions import permitted_object_ids
-from documents.permissions import set_permissions_for_object
+from documents.permissions import set_permissions_for_objects
+from documents.permissions import user_is_unrestricted
 from documents.plugins.date_parsing import get_date_parser
 from documents.schema import generate_object_with_permissions_schema
 from documents.search import SearchHit
@@ -190,7 +194,7 @@ from documents.serialisers import BulkEditSerializer
 from documents.serialisers import CorrespondentSerializer
 from documents.serialisers import CustomFieldSerializer
 from documents.serialisers import DeleteDocumentsSerializer
-from documents.serialisers import DocumentListSerializer
+from documents.serialisers import DocumentSelectionSerializer
 from documents.serialisers import DocumentSerializer
 from documents.serialisers import DocumentTypeSerializer
 from documents.serialisers import DocumentVersionLabelSerializer
@@ -231,9 +235,11 @@ from documents.tasks import train_classifier
 from documents.tasks import update_document_parent_tags
 from documents.utils import get_boolean
 from documents.versioning import VersionResolutionError
+from documents.versioning import annotate_effective_content
 from documents.versioning import get_latest_version_for_root
 from documents.versioning import get_request_version_param
 from documents.versioning import get_root_document
+from documents.versioning import latest_version_content_prefetch
 from documents.versioning import resolve_requested_version_for_root
 from documents.versioning import versions_newest_first
 from paperless import version
@@ -250,6 +256,7 @@ from paperless.views import StandardPagination
 from paperless_ai.ai_classifier import get_ai_document_classification
 from paperless_ai.ai_classifier import get_llm_output_language
 from paperless_ai.chat import stream_chat_with_documents
+from paperless_ai.exceptions import LLMProviderError
 from paperless_ai.exceptions import LLMTimeoutError
 from paperless_ai.matching import extract_unmatched_names
 from paperless_ai.matching import match_correspondents_by_name
@@ -283,17 +290,40 @@ logger = logging.getLogger("paperless.api")
 _TANTIVY_INTERSECT_THRESHOLD = 5_000
 _TANTIVY_SEARCH_PARAM_NAMES = ("text", "title_search", "query", "more_like_id")
 
+# whoosh-compat's fieldname tagger (used only for SearchMode.QUERY, via the
+# whoosh grammar in parse_user_query) is O(n^2) in plain word characters:
+# measured at ~0.96s/10k chars, ~3.67s/20k, ~14.4s/40k against the real field
+# registry. Django's DATA_UPLOAD_MAX_MEMORY_SIZE default (2.5 MB) does not
+# bound this on the POST-body selection-filter path, so an unbounded query
+# is a single-request CPU exhaustion vector. 4096 chars caps the worst case
+# at roughly 0.16s (quadratic extrapolation from the measurements above),
+# far beyond any plausible hand-typed advanced query, while still being fast
+# enough to absorb inside a request handler. Applied to all three modes at
+# this shared choke point: TEXT and TITLE route through simple_search_tokens
+# instead and measure linear even at 20k chars, so the cap is hygiene for
+# them, not a fix, but a single limit here is simpler than one exemption.
+# Not exposed as a PAPERLESS_* setting: this is a hard security boundary,
+# not a tunable, and a raisable ceiling would let a misconfiguration
+# reintroduce the exact hazard this exists to close.
+_MAX_QUERY_LENGTH: Final[int] = 4096
+
 
 def _get_tantivy_query_and_mode(params):
+    from documents.search import QueryTooLongError
     from documents.search import SearchMode
 
     if "text" in params:
-        return str(params["text"]), SearchMode.TEXT
-    if "title_search" in params:
-        return str(params["title_search"]), SearchMode.TITLE
-    if "query" in params:
-        return str(params["query"]), SearchMode.QUERY
-    return None  # pragma: no cover
+        raw, mode = str(params["text"]), SearchMode.TEXT
+    elif "title_search" in params:
+        raw, mode = str(params["title_search"]), SearchMode.TITLE
+    elif "query" in params:
+        raw, mode = str(params["query"]), SearchMode.QUERY
+    else:
+        return None  # pragma: no cover
+
+    if len(raw) > _MAX_QUERY_LENGTH:
+        raise QueryTooLongError(len(raw), _MAX_QUERY_LENGTH)
+    return raw, mode
 
 
 def _get_more_like_id(query_params: dict[str, Any], user: User | None) -> int:
@@ -577,13 +607,19 @@ class CorrespondentViewSet(
     def list(self, request, *args, **kwargs):
         if request.query_params.get("last_correspondence", None):
             self.queryset = self.queryset.annotate(
-                last_correspondence=Max("documents__created"),
+                last_correspondence=Max(
+                    "documents__created",
+                    filter=self.get_document_count_filter(),
+                ),
             )
         return super().list(request, *args, **kwargs)
 
     def retrieve(self, request, *args, **kwargs):
         self.queryset = self.queryset.annotate(
-            last_correspondence=Max("documents__created"),
+            last_correspondence=Max(
+                "documents__created",
+                filter=self.get_document_count_filter(),
+            ),
         )
         return super().retrieve(request, *args, **kwargs)
 
@@ -635,7 +671,9 @@ class TagViewSet(PermissionsAwareDocumentCountMixin, ModelViewSet[Tag]):
                 annotate_document_count_for_related_queryset(
                     Tag.objects.filter(
                         pk__in=descendant_pks | {t.pk for t in all_tags},
-                    ).select_related("owner"),
+                    )
+                    .filter(pk__in=permitted_object_ids(user, Tag, "view_tag"))
+                    .select_related("owner"),
                     through_model=self.document_count_through,
                     related_object_field=self._get_document_count_source_field(),
                     user=user,
@@ -1073,12 +1111,59 @@ class DocumentViewSet(
             ],
         }
 
-    def get_queryset(self):
-        latest_version_content = Subquery(
-            versions_newest_first(
-                Document.objects.filter(root_document=OuterRef("pk")),
-            ).values("content")[:1],
+    @classmethod
+    def _content_filter_params(cls) -> tuple[str, ...]:
+        """
+        Query params whose filtering needs effective_content evaluated in SQL
+        against every candidate row -- see
+        _needs_effective_content_annotation(). Derived rather than
+        hand-maintained so a new content-filtering param counts automatically.
+        """
+        params = [
+            name
+            for name, f in DocumentFilterSet.declared_filters.items()
+            if isinstance(f, (TitleContentFilter, EffectiveContentFilter))
+        ]
+        if "effective_content" in cls.search_fields:
+            params.append(SearchFilter().search_param)
+        return tuple(params)
+
+    def _needs_effective_content_annotation(self) -> bool:
+        # effective_content is a per-row correlated subquery resolving each
+        # document's latest version. Filtering *on* it forces the database to
+        # evaluate it for every candidate row before reaching the LIMIT, which
+        # the root_document_id self-join makes pathological on MariaDB
+        # specifically once real candidate counts get large; otherwise the
+        # "versions" prefetch + Document.get_effective_content() resolves only
+        # the page that survives pagination. Every param here is deprecated in
+        # favor of the Tantivy-backed search endpoint (see filters.py's
+        # TitleContentFilter/EffectiveContentFilter docs), so pay that cost
+        # only when one is actually used. Blank values don't count, matching
+        # how those filters themselves no-op on them -- an empty `?search=`
+        # applies no predicate.
+        params = self.request.query_params
+        return any(
+            params.get(param, "").strip() for param in self._content_filter_params()
         )
+
+    def _requested_fields(self) -> list[str] | None:
+        # The sparse-fieldset `fields` param, as DynamicFieldsModelSerializer
+        # wants it: None means "no restriction, serialize everything", which
+        # a blank value means too. get_queryset() and get_serializer() both
+        # branch on this, and they have to read it identically -- a queryset
+        # that skips the content prefetch for a response that still
+        # serializes content reintroduces get_effective_content()'s
+        # per-instance fallback.
+        fields_param = self.request.query_params.get("fields")
+        return fields_param.split(",") if fields_param else None
+
+    def _needs_effective_content_prefetch(self) -> bool:
+        # The prefetch spares get_effective_content() a per-instance fallback
+        # query, but only earns itself when content can reach the response.
+        fields = self._requested_fields()
+        return fields is None or "content" in fields
+
+    def get_queryset(self):
         # A correlated subquery avoids the LEFT JOIN + Count() this used to
         # be, which forced a GROUP BY aggregate over every matching document
         # before the query could even be sorted or limited.
@@ -1098,40 +1183,43 @@ class DocumentViewSet(
         # ObjectFilter.filter(). A blanket .distinct() here forces the
         # database to fully sort and dedupe every visible document before
         # it can apply LIMIT, which is disastrous at scale.
-        return (
+        prefetches = [
+            Prefetch(
+                "versions",
+                queryset=Document.objects.only(
+                    "id",
+                    "added",
+                    "checksum",
+                    "version_label",
+                    "root_document_id",
+                    "version_index",
+                ),
+            ),
+            "tags",
+            Prefetch(
+                "custom_fields",
+                queryset=CustomFieldInstance.objects.select_related("field"),
+            ),
+            # NotesSerializer nests the author, this avoids query per note
+            Prefetch("notes", queryset=Note.objects.select_related("user")),
+        ]
+        if self._needs_effective_content_prefetch():
+            prefetches.append(latest_version_content_prefetch())
+        queryset = (
             Document.objects.filter(root_document__isnull=True)
             .order_by("-created", "-id")
-            .annotate(effective_content=Coalesce(latest_version_content, F("content")))
             .annotate(num_notes=Coalesce(note_count, 0))
             .select_related("correspondent", "storage_path", "document_type", "owner")
-            .prefetch_related(
-                Prefetch(
-                    "versions",
-                    queryset=Document.objects.only(
-                        "id",
-                        "added",
-                        "checksum",
-                        "version_label",
-                        "root_document_id",
-                        "version_index",
-                    ),
-                ),
-                "tags",
-                Prefetch(
-                    "custom_fields",
-                    queryset=CustomFieldInstance.objects.select_related("field"),
-                ),
-                # NotesSerializer nests the author, this avoids query per note
-                Prefetch("notes", queryset=Note.objects.select_related("user")),
-            )
+            .prefetch_related(*prefetches)
         )
+        if self._needs_effective_content_annotation():
+            queryset = annotate_effective_content(queryset)
+        return queryset
 
     def get_serializer(self, *args, **kwargs):
-        fields_param = self.request.query_params.get("fields", None)
-        fields = fields_param.split(",") if fields_param else None
         truncate_content = self.request.query_params.get("truncate_content", "False")
         kwargs.setdefault("context", self.get_serializer_context())
-        kwargs.setdefault("fields", fields)
+        kwargs.setdefault("fields", self._requested_fields())
         kwargs.setdefault("truncate_content", truncate_content.lower() in ["true", "1"])
         try:
             full_perms = get_boolean(
@@ -1593,6 +1681,22 @@ class DocumentViewSet(
                     {"ai": [_("AI backend request timed out.")]},
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
+            except LLMProviderError:
+                logger.exception(
+                    "AI backend rejected the request for document %s",
+                    doc.pk,
+                )
+                return Response(
+                    {
+                        "ai": [
+                            _(
+                                "AI backend rejected the request. "
+                                "Check logs for details.",
+                            ),
+                        ],
+                    },
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
             set_llm_suggestions_cache(
                 doc.pk,
                 llm_suggestions,
@@ -1879,7 +1983,14 @@ class DocumentViewSet(
             now = timezone.now()
             links = (
                 ShareLink.objects.filter(document=doc)
-                .only("pk", "created", "expiration", "slug")
+                .select_related("document")
+                .only(
+                    "pk",
+                    "created",
+                    "expiration",
+                    "slug",
+                    "document__title",
+                )
                 .exclude(expiration__lt=now)
                 .order_by("-created")
             )
@@ -2082,6 +2193,7 @@ class DocumentViewSet(
             if version_label:
                 overrides.version_label = version_label.strip()
             if request.user is not None:
+                overrides.owner_id = request.user.id
                 overrides.actor_id = request.user.id
 
             async_task = consume_file.apply_async(
@@ -2300,7 +2412,6 @@ class ChatStreamingView(GenericAPIView[Any]):
     serializer_class = ChatStreamingSerializer
 
     def post(self, request, *args, **kwargs):
-        request.compress_exempt = True
         ai_config = AIConfig()
         if not ai_config.ai_enabled:
             return HttpResponseBadRequest("AI is required for this feature")
@@ -2321,10 +2432,12 @@ class ChatStreamingView(GenericAPIView[Any]):
                 return HttpResponseForbidden("Insufficient permissions")
 
             documents = Document.objects.filter(pk=document.pk)
+            unrestricted = False
         else:
             documents = Document.objects.filter(
                 id__in=permitted_document_ids(request.user),
             )
+            unrestricted = user_is_unrestricted(request.user)
 
         output_language = get_llm_output_language(
             ai_config=ai_config,
@@ -2335,6 +2448,7 @@ class ChatStreamingView(GenericAPIView[Any]):
             stream_chat_with_documents(
                 query_str=question,
                 documents=documents,
+                unrestricted=unrestricted,
                 output_language=output_language,
             ),
             content_type="text/event-stream",
@@ -2422,6 +2536,7 @@ class UnifiedSearchViewSet(DocumentViewSet):
         from documents.search import TantivyBackend
         from documents.search import TantivyRelevanceList
         from documents.search import get_backend
+        from documents.search import search_query_error_messages
 
         def parse_search_params() -> SearchParams:
             """Extract query string, search mode, and ordering from request."""
@@ -2612,15 +2727,10 @@ class UnifiedSearchViewSet(DocumentViewSet):
         except ValidationError:
             raise
         except SearchQueryError as e:
-            # User-fixable query error (e.g. an unparsable date): surface the
-            # specific message so the user can correct it, rather than a generic
-            # 400 or silently empty results.
-            raise ValidationError({"query": [str(e)]}) from e
-        except Exception as e:
-            logger.warning(f"An error occurred listing search results: {e!s}")
-            return HttpResponseBadRequest(
-                "Error listing search results, check logs for more detail.",
-            )
+            # User-fixable query error(s) (e.g. unparsable dates/numbers):
+            # surface every offending field's message, not just the first,
+            # so the user can fix them all in one round-trip.
+            raise ValidationError({"query": search_query_error_messages(e)}) from e
 
     @action(detail=False, methods=["GET"], name="Get Next ASN")
     def next_asn(self, request, *args, **kwargs):
@@ -2756,23 +2866,34 @@ class DocumentSelectionMixin:
                 },
             )
 
+        from documents.search import SearchQueryError
         from documents.search import get_backend
+        from documents.search import search_query_error_messages
 
         filter_name = search_filters[0]
         backend = get_backend()
         search_user = None if user.is_superuser else user
 
-        if filter_name == "more_like_id":
-            more_like_doc_id = _get_more_like_id(filters, user)
+        try:
+            if filter_name == "more_like_id":
+                more_like_doc_id = _get_more_like_id(filters, user)
 
-            search_ids = backend.more_like_this_ids(more_like_doc_id, user=search_user)
-        else:
-            query_str, search_mode = _get_tantivy_query_and_mode(filters)
-            search_ids = backend.search_ids(
-                query_str,
-                user=search_user,
-                search_mode=search_mode,
-            )
+                search_ids = backend.more_like_this_ids(
+                    more_like_doc_id,
+                    user=search_user,
+                )
+            else:
+                query_str, search_mode = _get_tantivy_query_and_mode(filters)
+                search_ids = backend.search_ids(
+                    query_str,
+                    user=search_user,
+                    search_mode=search_mode,
+                )
+        except SearchQueryError as e:
+            # Same user-fixable-query mapping as the search list endpoint:
+            # a bad date/number in a bulk selection filter is a 400 naming
+            # the value, never a 500.
+            raise ValidationError({"query": search_query_error_messages(e)}) from e
 
         return search_ids
 
@@ -2803,6 +2924,7 @@ class DocumentSelectionMixin:
         filtered_documents = DocumentFilterSet(
             data=orm_filters,
             queryset=permitted_documents,
+            user=user,
         ).qs.distinct()
         # tantivy-filtered docs (if search params provided)
         search_filtered_ids = self._get_search_document_ids(
@@ -2811,6 +2933,10 @@ class DocumentSelectionMixin:
         )
         if search_filtered_ids is not None:
             filtered_documents = filtered_documents.filter(pk__in=search_filtered_ids)
+        if validated_data.get("excluded_documents"):
+            filtered_documents = filtered_documents.exclude(
+                pk__in=validated_data["excluded_documents"],
+            )
         return list(filtered_documents.values_list("pk", flat=True))
 
 
@@ -2934,7 +3060,14 @@ class DocumentOperationPermissionMixin(PassUserMixin, DocumentSelectionMixin):
         parameters = {
             k: v
             for k, v in validated_data.items()
-            if k not in {"documents", "all", "filters", "from_webui"}
+            if k
+            not in {
+                "documents",
+                "all",
+                "filters",
+                "excluded_documents",
+                "from_webui",
+            }
         }
         user = self.request.user
         from_webui = validated_data.get("from_webui", False)
@@ -3435,16 +3568,19 @@ class PostDocumentView(GenericAPIView[Any]):
         },
     ),
 )
-class SelectionDataView(GenericAPIView[Any]):
-    permission_classes = (IsAuthenticated,)
-    serializer_class = DocumentListSerializer
+class SelectionDataView(DocumentSelectionMixin, GenericAPIView[Any]):
+    permission_classes = (IsAuthenticated, ViewDocumentsPermissions)
+    serializer_class = DocumentSelectionSerializer
     parser_classes = (parsers.MultiPartParser, parsers.JSONParser)
 
     def post(self, request, format=None):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        ids = serializer.validated_data.get("documents")
+        ids = self._resolve_document_ids(
+            user=request.user,
+            validated_data=serializer.validated_data,
+        )
         permitted_documents = Document.objects.filter(
             id__in=permitted_document_ids(request.user),
         )
@@ -3612,14 +3748,23 @@ class GlobalSearchView(PassUserMixin):
             return HttpResponseBadRequest("Query required")
         if len(query) < 3:
             return HttpResponseBadRequest("Query must be at least 3 characters")
+        if len(query) > _MAX_QUERY_LENGTH:
+            return HttpResponseBadRequest(
+                f"Query must be at most {_MAX_QUERY_LENGTH} characters",
+            )
 
         db_only = request.query_params.get("db_only", False)
 
         OBJECT_LIMIT = 3
         docs = []
         if request.user.has_perm("documents.view_document"):
-            all_docs = Document.objects.filter(
-                id__in=permitted_document_ids(request.user),
+            # Never more than OBJECT_LIMIT rows come back here, so annotating
+            # is cheap -- and without it these results show the root
+            # document's superseded content.
+            all_docs = annotate_effective_content(
+                Document.objects.filter(
+                    id__in=permitted_document_ids(request.user),
+                ),
             )
             if db_only:
                 docs = all_docs.filter(title__icontains=query)[:OBJECT_LIMIT]
@@ -3922,7 +4067,7 @@ class StatisticsView(GenericAPIView[Any]):
     ),
 )
 class BulkDownloadView(DocumentSelectionMixin, GenericAPIView[Any]):
-    permission_classes = (IsAuthenticated,)
+    permission_classes = (IsAuthenticated, ViewDocumentsPermissions)
     serializer_class = BulkDownloadSerializer
     parser_classes = (parsers.JSONParser,)
 
@@ -4021,7 +4166,7 @@ class StoragePathViewSet(PermissionsAwareDocumentCountMixin, ModelViewSet[Storag
     def get_permissions(self):
         if self.action == "test":
             # Test action does not require object level permissions
-            self.permission_classes = (IsAuthenticated,)
+            self.permission_classes = (IsAuthenticated, ViewDocumentsPermissions)
         return super().get_permissions()
 
     def destroy(self, request, *args, **kwargs):
@@ -4541,7 +4686,7 @@ class ShareLinkViewSet(
 ):
     model = ShareLink
 
-    queryset = ShareLink.objects.all()
+    queryset = ShareLink.objects.select_related("document")
 
     serializer_class = ShareLinkSerializer
     pagination_class = StandardPagination
@@ -4552,7 +4697,7 @@ class ShareLinkViewSet(
         PermittedObjectsFilter,
     )
     filterset_class = ShareLinkFilterSet
-    ordering_fields = ("created", "expiration", "document")
+    ordering_fields = ("created", "expiration", "document__title")
 
 
 @extend_schema_view(
@@ -4571,6 +4716,10 @@ class ShareLinkViewSet(
 class ShareLinkBundleViewSet(PassUserMixin, ModelViewSet[ShareLinkBundle]):
     model = ShareLinkBundle
 
+    # Bundles are immutable once created; rebuild via the dedicated action
+    # rather than PUT/PATCH.
+    http_method_names = ["get", "post", "delete", "head", "options"]
+
     queryset = ShareLinkBundle.objects.all()
 
     serializer_class = ShareLinkBundleSerializer
@@ -4583,6 +4732,12 @@ class ShareLinkBundleViewSet(PassUserMixin, ModelViewSet[ShareLinkBundle]):
     )
     filterset_class = ShareLinkBundleFilterSet
     ordering_fields = ("created", "expiration", "status")
+
+    def get_permissions(self):
+        permissions = super().get_permissions()
+        if self.action == "create":
+            permissions.append(ViewDocumentsPermissions())
+        return permissions
 
     def get_queryset(self):
         return (
@@ -4705,12 +4860,15 @@ class SharedLinkView(View):
                 and share_link.expiration < timezone.now()
             ):
                 return HttpResponseRedirect("/accounts/login/?sharelink_expired=1")
-            return serve_file(
-                doc=share_link.document,
-                use_archive=share_link.file_version == ShareLink.FileVersion.ARCHIVE
-                and share_link.document.has_archive_version,
-                disposition="inline",
-            )
+            try:
+                return serve_file(
+                    doc=share_link.document,
+                    use_archive=share_link.file_version == ShareLink.FileVersion.ARCHIVE
+                    and share_link.document.has_archive_version,
+                    disposition="inline",
+                )
+            except FileNotFoundError:
+                return HttpResponseRedirect("/accounts/login/?sharelink_notfound=1")
 
         bundle = ShareLinkBundle.objects.filter(slug=slug).first()
         if bundle is None:
@@ -4732,7 +4890,11 @@ class SharedLinkView(View):
 
         file_path = bundle.absolute_file_path
 
-        if bundle.status == ShareLinkBundle.Status.FAILED or file_path is None:
+        if (
+            bundle.status == ShareLinkBundle.Status.FAILED
+            or file_path is None
+            or not file_path.exists()
+        ):
             return HttpResponse(
                 _(
                     "The share link bundle is unavailable.",
@@ -4919,12 +5081,12 @@ class BulkEditObjectsView(PassUserMixin):
                     qs_owner_update.update(owner=owner)
 
                 if "permissions" in serializer.validated_data:
-                    for obj in qs:
-                        set_permissions_for_object(
-                            permissions=permissions,
-                            object=obj,
-                            merge=merge,
-                        )
+                    set_permissions_for_objects(
+                        permissions=permissions,
+                        model=object_class,
+                        pks=qs.values_list("pk", flat=True),
+                        merge=merge,
+                    )
 
             except Exception as e:
                 logger.warning(
@@ -5395,7 +5557,7 @@ class SystemStatusView(PassUserMixin):
 
 
 class TrashView(ListModelMixin, PassUserMixin):
-    permission_classes = (IsAuthenticated,)
+    permission_classes = (IsAuthenticated, TrashPermissions)
     serializer_class = TrashSerializer
 
     class _TrashPermittedObjectsFilter(PermittedObjectsFilter):
@@ -5406,7 +5568,10 @@ class TrashView(ListModelMixin, PassUserMixin):
 
     model = Document
 
-    queryset = Document.deleted_objects.all()
+    # A version is listed separately only when its root is not in the trash.
+    queryset = Document.deleted_objects.exclude(
+        root_document_id__in=Document.deleted_objects.values("id"),
+    )
 
     def get(self, request: Request, format: str | None = None) -> Response:
         self.serializer_class = DocumentSerializer
@@ -5437,15 +5602,22 @@ class TrashView(ListModelMixin, PassUserMixin):
             return HttpResponseForbidden("Insufficient permissions")
         action = serializer.validated_data.get("action")
         if action == "restore":
-            restored = list(Document.deleted_objects.filter(id__in=doc_ids))
+            restored = list(self.get_queryset().filter(id__in=doc_ids))
+            if len(restored) != len(doc_ids):
+                raise ValidationError(
+                    {
+                        "documents": [
+                            "Restore the root document instead of one of its versions.",
+                        ],
+                    },
+                )
             for doc in restored:
                 doc.restore(strict=False)
             if restored:
                 from documents.search import get_backend
 
                 with get_backend().batch_update() as batch:
-                    for doc in restored:
-                        batch.add_or_update(doc)
+                    batch.add_or_update_ids([doc.pk for doc in restored])
         elif action == "empty":
             if doc_ids is None:
                 doc_ids = [doc.id for doc in docs]
