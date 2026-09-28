@@ -117,25 +117,26 @@ jobs:
           GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.latest.outputs.tag }}
         run: |
-          # GitHub's PR-creation API can lag well behind the git ref
-          # store after a branch is pushed (observed up to ~90s, worse
-          # right after a same-named branch was just deleted), so
-          # pr create fails with "No commits between dev and $BRANCH"
-          # even though the push already succeeded. Retry with a long
-          # enough window to ride that out - this workflow runs at
-          # most weekly, so a few extra minutes here is cheap.
+          # `gh pr create` (GraphQL) observed failing with "No commits
+          # between dev and $BRANCH" for minutes after a successful
+          # push, well past when the REST compare API already showed
+          # the branch as ahead and mergeable - a GraphQL-side replica
+          # lag, not a real problem with the branch. Use the REST pulls
+          # endpoint instead, which didn't show this lag, and keep a
+          # retry loop as a safety net regardless (this workflow runs
+          # at most weekly, so a few extra minutes here is cheap).
           BODY="Automated merge of \`paperless-ngx/paperless-ngx@$TAG\` into this fork's \`dev\`. The jpn Tesseract-language change (b75f70c) is carried forward automatically since it's already part of \`dev\`'s history - please still skim the diff, especially around the Dockerfile's tesseract-ocr package list, before merging.
 
           Release notes: https://github.com/paperless-ngx/paperless-ngx/releases/tag/$TAG"
           for attempt in $(seq 1 12); do
-            if gh pr create \
-              --base dev \
-              --head "$BRANCH" \
-              --title "Sync with upstream paperless-ngx $TAG" \
-              --body "$BODY"; then
+            if gh api "repos/$GITHUB_REPOSITORY/pulls" \
+              -f head="$BRANCH" \
+              -f base="dev" \
+              -f title="Sync with upstream paperless-ngx $TAG" \
+              -f body="$BODY" >/dev/null; then
               exit 0
             fi
-            echo "gh pr create failed (attempt $attempt/12), retrying in 15s..."
+            echo "PR creation failed (attempt $attempt/12), retrying in 15s..."
             sleep 15
           done
           exit 1
