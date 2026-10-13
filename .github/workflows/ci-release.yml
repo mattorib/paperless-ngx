@@ -71,7 +71,7 @@ jobs:
           uv sync --python "${PYTHON_VERSION}" --dev --frozen
       - name: Install system dependencies
         timeout-minutes: 12
-        uses: $/.github/actions/apt-install # nosemgrep: yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag
+        uses: $/.github/actions/apt-install
         with:
           packages: gettext liblept5
       # ---- Build Documentation ----

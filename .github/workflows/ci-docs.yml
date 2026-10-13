@@ -63,8 +63,7 @@ jobs:
               - '.github/workflows/ci-docs.yml'
   build:
     needs: changes
-    # Forks don't have GitHub Pages enabled, so configure-pages would fail there
-    if: needs.changes.outputs.docs_changed == 'true' && github.repository == 'paperless-ngx/paperless-ngx'
+    if: needs.changes.outputs.docs_changed == 'true'
     name: Build Documentation
     runs-on: ubuntu-24.04
     steps:
@@ -126,11 +125,6 @@ jobs:
         run: |
           if [[ "${{ needs.changes.outputs.docs_changed }}" != "true" ]]; then
             echo "No docs-relevant changes detected."
-            exit 0
-          fi
-
-          if [[ "${{ github.repository }}" != "paperless-ngx/paperless-ngx" ]]; then
-            echo "Docs build is skipped outside the upstream repository (no GitHub Pages on forks)."
             exit 0
           fi
 
