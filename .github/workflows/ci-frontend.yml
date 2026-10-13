@@ -232,7 +232,7 @@ jobs:
         run: cd src-ui && pnpm install --frozen-lockfile
       - name: Install backend system dependencies
         timeout-minutes: 12
-        uses: ./.github/actions/apt-install
+        uses: $/.github/actions/apt-install # nosemgrep: yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag
         with:
           packages: libmagic1
       - name: Install backend dependencies
