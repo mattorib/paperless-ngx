@@ -1,6 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing'
 import { NgbDropdownModule } from '@ng-bootstrap/ng-bootstrap'
-import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
 import { SuggestionSource } from 'src/app/data/ui-settings'
 import { SuggestionsDropdownComponent } from './suggestions-dropdown.component'
 
@@ -10,11 +9,7 @@ describe('SuggestionsDropdownComponent', () => {
 
   beforeEach(() => {
     TestBed.configureTestingModule({
-      imports: [
-        NgbDropdownModule,
-        NgxBootstrapIconsModule.pick(allIcons),
-        SuggestionsDropdownComponent,
-      ],
+      imports: [NgbDropdownModule, SuggestionsDropdownComponent],
       providers: [],
     })
     fixture = TestBed.createComponent(SuggestionsDropdownComponent)
@@ -249,6 +244,37 @@ describe('SuggestionsDropdownComponent', () => {
     component.clickSuggest()
     expect(component.dropdown.isOpen()).toBeTruthy()
     expect(fixture.nativeElement.textContent).toContain('No novel suggestions')
+  })
+
+  it('should open ML date suggestions with AI disabled', () => {
+    const getSuggestions = jest.spyOn(component.getSuggestions, 'emit')
+    fixture.componentRef.setInput('aiEnabled', false)
+    fixture.componentRef.setInput('fetchedSources', [SuggestionSource.ML])
+    fixture.componentRef.setInput('suggestions', {
+      dates: ['2026-01-04', '2026-02-01'],
+    })
+    fixture.componentRef.setInput('appliedCreated', '2026-01-04')
+    fixture.detectChanges()
+
+    const button = fixture.nativeElement.querySelector('button')
+    expect(button.disabled).toBeFalsy()
+    expect(button.querySelector('.badge').textContent.trim()).toBe('1')
+
+    button.click()
+    fixture.detectChanges()
+
+    expect(component.dropdown.isOpen()).toBeTruthy()
+    expect(fixture.nativeElement.textContent).toContain(
+      '1 suggestion available below'
+    )
+    expect(getSuggestions).not.toHaveBeenCalled()
+    expect(
+      fixture.nativeElement.querySelector('button[title="Suggestion options"]')
+    ).toBeNull()
+
+    button.click()
+    fixture.detectChanges()
+    expect(component.dropdown.isOpen()).toBeFalsy()
   })
 
   it('should fetch unfetched sources and show existing suggestions', () => {
