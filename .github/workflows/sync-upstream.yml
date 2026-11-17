@@ -78,8 +78,19 @@ jobs:
         env:
           TAG: ${{ steps.latest.outputs.tag }}
         run: |
+          # If the previous run's sync branch for this same tag is still
+          # around (its PR not merged yet, or merged without deleting the
+          # branch), leave it alone: re-creating it from the current dev
+          # produces a different merge commit, so the push gets rejected
+          # as non-fast-forward, and force-pushing would clobber any
+          # fixups made on the branch. Delete the branch to re-sync.
+          # fetch-depth: 0 on checkout fetches all branches, so
+          # refs/remotes/origin/* is already populated here.
           if git merge-base --is-ancestor "$TAG" dev; then
             echo "No new upstream release."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          elif git show-ref --verify --quiet "refs/remotes/origin/sync-upstream-$TAG"; then
+            echo "::notice::Branch sync-upstream-$TAG already exists - merge or close its PR (and delete the branch) to re-sync."
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
