@@ -6,14 +6,15 @@ import {
 } from '@angular/common/http/testing'
 import { ComponentFixture, TestBed } from '@angular/core/testing'
 import { FormsModule, ReactiveFormsModule } from '@angular/forms'
-import { BrowserModule } from '@angular/platform-browser'
+import { BrowserModule, By } from '@angular/platform-browser'
 import { ActivatedRoute, Router } from '@angular/router'
 import { RouterTestingModule } from '@angular/router/testing'
 import { NgbModal, NgbModalModule, NgbModule } from '@ng-bootstrap/ng-bootstrap'
-import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
 import { provideUiTour } from 'ngx-ui-tour-ng-bootstrap'
-import { of, throwError } from 'rxjs'
+import { of, Subject, throwError } from 'rxjs'
 import { routes } from 'src/app/app-routing.module'
+import { BulkOperationStatus } from 'src/app/data/bulk-operation'
+import { PaperlessTaskStatus } from 'src/app/data/paperless-task'
 import { SavedView } from 'src/app/data/saved-view'
 import { HideableSidebarItemID, SETTINGS_KEYS } from 'src/app/data/ui-settings'
 import { IfPermissionsDirective } from 'src/app/directives/if-permissions.directive'
@@ -22,19 +23,24 @@ import {
   DjangoMessageLevel,
   DjangoMessagesService,
 } from 'src/app/services/django-messages.service'
+import { DocumentListViewService } from 'src/app/services/document-list-view.service'
 import { OpenDocumentsService } from 'src/app/services/open-documents.service'
 import {
-  PermissionType,
   PermissionsService,
+  PermissionType,
 } from 'src/app/services/permissions.service'
 import { RemoteVersionService } from 'src/app/services/rest/remote-version.service'
 import { SavedViewService } from 'src/app/services/rest/saved-view.service'
 import { SearchService } from 'src/app/services/rest/search.service'
 import { SettingsService } from 'src/app/services/settings.service'
+import { TaskNotificationService } from 'src/app/services/task-notification.service'
 import { TasksService } from 'src/app/services/tasks.service'
 import { ToastService } from 'src/app/services/toast.service'
+import { UploadDocumentsService } from 'src/app/services/upload-documents.service'
+import { WebsocketStatusService } from 'src/app/services/websocket-status.service'
 import { environment } from 'src/environments/environment'
 import { ProfileEditDialogComponent } from '../common/profile-edit-dialog/profile-edit-dialog.component'
+import { UploadStatusTrayComponent } from '../common/upload-status-tray/upload-status-tray.component'
 import { DocumentDetailComponent } from '../document-detail/document-detail.component'
 import { AppFrameComponent } from './app-frame.component'
 import { GlobalSearchComponent } from './global-search/global-search.component'
@@ -93,6 +99,7 @@ describe('AppFrameComponent', () => {
   let savedViewSpy
   let modalService: NgbModal
   let maybeRefreshSpy
+  let bulkEvents: Subject<BulkOperationStatus>
   let tasksService: TasksService
 
   beforeEach(async () => {
@@ -105,7 +112,6 @@ describe('AppFrameComponent', () => {
         ReactiveFormsModule,
         DragDropModule,
         NgbModalModule,
-        NgxBootstrapIconsModule.pick(allIcons),
         AppFrameComponent,
         IfPermissionsDirective,
         GlobalSearchComponent,
@@ -181,12 +187,118 @@ describe('AppFrameComponent', () => {
     savedViewSpy = jest.spyOn(savedViewService, 'reload')
     maybeRefreshSpy = jest.spyOn(savedViewService, 'maybeRefreshDocumentCounts')
 
+    bulkEvents = new Subject<BulkOperationStatus>()
+    jest
+      .spyOn(TestBed.inject(WebsocketStatusService), 'onBulkOperationStatus')
+      .mockReturnValue(bulkEvents.asObservable())
     fixture = TestBed.createComponent(AppFrameComponent)
     component = fixture.componentInstance
 
     httpTestingController = TestBed.inject(HttpTestingController)
 
     fixture.detectChanges()
+  })
+
+  it('refreshes and updates the task notification on completion', () => {
+    const list = TestBed.inject(DocumentListViewService)
+    const reload = jest.spyOn(list, 'reload').mockImplementation(() => {})
+    jest.spyOn(list, 'reduceSelectionToFilter').mockImplementation(() => {})
+    const tasksReload = jest
+      .spyOn(tasksService, 'reload')
+      .mockImplementation(() => {})
+    const success = jest.spyOn(toastService, 'show')
+    const refresh = jest
+      .spyOn(openDocumentsService, 'refreshDocument')
+      .mockImplementation(() => {})
+    jest
+      .spyOn(openDocumentsService, 'getOpenDocuments')
+      .mockReturnValue([document])
+    tasksReload.mockClear()
+    maybeRefreshSpy.mockClear()
+    bulkEvents.next({
+      task_id: 'bulk-task',
+      operation: 'set_permissions',
+      status: PaperlessTaskStatus.Started,
+    })
+    expect(reload).not.toHaveBeenCalled()
+    bulkEvents.next({
+      task_id: 'bulk-task',
+      operation: 'set_permissions',
+      status: PaperlessTaskStatus.Success,
+    })
+    expect(reload).toHaveBeenCalledTimes(1)
+    expect(reload).toHaveBeenCalledWith(null, false)
+    expect(refresh).toHaveBeenCalledWith(document.id)
+    expect(maybeRefreshSpy).toHaveBeenCalledTimes(1)
+    expect(tasksReload).toHaveBeenCalledTimes(1)
+    expect(success).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'task-bulk-task',
+        content: "Operation 'Set permissions' completed.",
+      })
+    )
+    fixture.destroy()
+    bulkEvents.next({
+      task_id: 'bulk-task',
+      operation: 'set_permissions',
+      status: PaperlessTaskStatus.Success,
+    })
+    expect(reload).toHaveBeenCalledTimes(1)
+  })
+
+  it('refreshes and reports failed or revoked bulk operations', () => {
+    const list = TestBed.inject(DocumentListViewService)
+    const reload = jest.spyOn(list, 'reload').mockImplementation(() => {})
+    jest.spyOn(list, 'reduceSelectionToFilter').mockImplementation(() => {})
+    jest.spyOn(tasksService, 'reload').mockImplementation(() => {})
+    const error = jest.spyOn(toastService, 'show')
+    const success = jest.spyOn(toastService, 'showSuccess')
+    for (const status of [
+      PaperlessTaskStatus.Failure,
+      PaperlessTaskStatus.Revoked,
+    ]) {
+      bulkEvents.next({
+        task_id: `${status}-task`,
+        operation: 'set_permissions',
+        status,
+        error:
+          status === PaperlessTaskStatus.Revoked
+            ? 'Task expired before execution.'
+            : 'Could not update',
+      })
+    }
+    expect(reload).toHaveBeenCalledTimes(2)
+    expect(error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content:
+          "Operation 'Set permissions' failed. Some changes may already have been applied.",
+        error: 'Could not update',
+      })
+    )
+    expect(error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: "Operation 'Set permissions' revoked.",
+        error: 'Task expired before execution.',
+      })
+    )
+    expect(success).not.toHaveBeenCalled()
+  })
+
+  it('passes delete completion to the shared task notification handler', () => {
+    const success = jest.spyOn(toastService, 'showSuccess')
+    const notifications = TestBed.inject(TaskNotificationService)
+    const handleStatus = jest.spyOn(notifications, 'complete')
+    bulkEvents.next({
+      task_id: 'delete-1',
+      operation: 'delete',
+      status: PaperlessTaskStatus.Success,
+    })
+    expect(handleStatus).toHaveBeenCalledWith({
+      task_id: 'delete-1',
+      operation: 'delete',
+      status: PaperlessTaskStatus.Success,
+    })
+    expect(success).not.toHaveBeenCalled()
   })
 
   it('should initialize the saved view service', () => {
@@ -462,6 +574,45 @@ describe('AppFrameComponent', () => {
     expect(routerSpy).toHaveBeenCalled()
   })
 
+  it('should upload files selected from the navbar upload button', () => {
+    const uploadDocumentsService = TestBed.inject(UploadDocumentsService)
+    const uploadSpy = jest
+      .spyOn(uploadDocumentsService, 'uploadFiles')
+      .mockImplementation(() => {})
+    const toastSpy = jest.spyOn(toastService, 'showInfo')
+    const file = new File(['testing'], 'file.pdf')
+    const input = window.document.createElement('input')
+    jest.spyOn(input, 'files', 'get').mockReturnValue([file] as any)
+
+    component.onFileSelected({ target: input } as unknown as Event)
+    expect(toastSpy).not.toHaveBeenCalled()
+    expect(uploadSpy).toHaveBeenCalledWith([file])
+  })
+
+  it('should show in-progress uploads and expand the status tray', () => {
+    const websocketStatusService = TestBed.inject(WebsocketStatusService)
+    expect(component.uploadsInProgress).toEqual(0)
+    websocketStatusService.newFileUpload('file.pdf')
+    expect(component.uploadsInProgress).toEqual(1)
+
+    fixture.detectChanges()
+    const tray = fixture.debugElement.query(
+      By.directive(UploadStatusTrayComponent)
+    ).componentInstance as UploadStatusTrayComponent
+    tray.toggleCollapsed()
+    expect(tray.collapsed()).toBe(true)
+    component.showUploadStatus()
+    expect(tray.collapsed()).toBe(false)
+  })
+
+  it('should not upload when no files are selected from the navbar', () => {
+    const uploadDocumentsService = TestBed.inject(UploadDocumentsService)
+    const uploadSpy = jest.spyOn(uploadDocumentsService, 'uploadFiles')
+    const input = window.document.createElement('input')
+    component.onFileSelected({ target: input } as unknown as Event)
+    expect(uploadSpy).not.toHaveBeenCalled()
+  })
+
   it('should close all documents on logout', () => {
     const closeAllSpy = jest.spyOn(openDocumentsService, 'closeAll')
     component.onLogout()
@@ -483,7 +634,7 @@ describe('AppFrameComponent', () => {
 
   it('should update saved view sorting on drag + drop, show info', () => {
     const settingsSpy = jest.spyOn(settingsService, 'updateSidebarViewsSort')
-    const toastSpy = jest.spyOn(toastService, 'showInfo')
+    const toastSpy = jest.spyOn(toastService, 'showSuccess')
     jest.spyOn(settingsService, 'storeSettings').mockReturnValue(of(true))
     component.onDrop({ previousIndex: 0, currentIndex: 1 } as CdkDragDrop<
       SavedView[]
@@ -525,6 +676,7 @@ describe('AppFrameComponent', () => {
 
   it('should show toasts for django messages', () => {
     const toastErrorSpy = jest.spyOn(toastService, 'showError')
+    const toastSuccessSpy = jest.spyOn(toastService, 'showSuccess')
     const toastInfoSpy = jest.spyOn(toastService, 'showInfo')
     jest.spyOn(messagesService, 'get').mockReturnValue([
       { level: DjangoMessageLevel.WARNING, message: 'Test warning' },
@@ -535,7 +687,8 @@ describe('AppFrameComponent', () => {
     ])
     component.ngOnInit()
     expect(toastErrorSpy).toHaveBeenCalledTimes(2)
-    expect(toastInfoSpy).toHaveBeenCalledTimes(3)
+    expect(toastSuccessSpy).toHaveBeenCalledTimes(1)
+    expect(toastInfoSpy).toHaveBeenCalledTimes(2)
   })
 
   it('should call maybeRefreshDocumentCounts after saved views reload', () => {
@@ -544,8 +697,8 @@ describe('AppFrameComponent', () => {
 
   it('should show tasks badge for needs-attention tasks', () => {
     jest
-      .spyOn(tasksService, 'needsAttentionTasks', 'get')
-      .mockReturnValue([{} as any, {} as any])
+      .spyOn(tasksService, 'needsAttentionTasksCount', 'get')
+      .mockReturnValue(2)
 
     fixture.detectChanges()
 

@@ -46,8 +46,10 @@ from documents.models import UiSettings
 from documents.models import Workflow
 from documents.models import WorkflowAction
 from documents.models import WorkflowTrigger
+from documents.search import get_backend
 from documents.signals.handlers import run_workflows
 from documents.tests.utils import ConsumeTaskMixin
+from documents.views import DocumentViewSet
 from paperless_testing.dirs import DirectoriesMixin
 from paperless_testing.factories import DocumentFactory
 from paperless_testing.factories import TagFactory
@@ -56,6 +58,8 @@ from paperless_testing.http import read_streaming_response
 from paperless_testing.permissions import grant_all_global
 from paperless_testing.permissions import grant_global
 from paperless_testing.permissions import grant_object
+from paperless_testing.samples import SIMPLE_DIGITAL_PDF
+from paperless_testing.samples import THUMBNAIL_WEBP
 
 
 class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
@@ -65,6 +69,70 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
         self.user = UserFactory(username="temp_admin", superuser=True)
         self.client.force_authenticate(user=self.user)
         cache.clear()
+
+    def test_detail_save_indexes_final_workflow_state(self) -> None:
+        viewer = UserFactory()
+        grant_global(viewer, "view_document")
+        inbox = TagFactory(is_inbox_tag=True)
+        doc = DocumentFactory(owner=self.user, content="distinctiveword")
+        doc.tags.add(inbox)
+        trigger = WorkflowTrigger.objects.create(
+            type=WorkflowTrigger.WorkflowTriggerType.DOCUMENT_UPDATED,
+        )
+        action = WorkflowAction.objects.create(assign_title="Workflow title")
+        action.assign_view_users.add(viewer)
+        action.remove_view_users.add(viewer)
+        workflow = Workflow.objects.create(name="Update document")
+        workflow.triggers.add(trigger)
+        workflow.actions.add(action)
+        backend = get_backend()
+        backend.add_or_update(doc)
+
+        for action_type in (
+            WorkflowAction.WorkflowActionType.ASSIGNMENT,
+            WorkflowAction.WorkflowActionType.REMOVAL,
+            WorkflowAction.WorkflowActionType.MOVE_TO_TRASH,
+        ):
+            with self.subTest(action_type=action_type):
+                grant = action_type == WorkflowAction.WorkflowActionType.ASSIGNMENT
+                action.type = action_type
+                action.save()
+                trigger.filter_has_not_tags.set([inbox] if grant else [])
+                trigger.filter_has_tags.set([] if grant else [inbox])
+                self.client.force_authenticate(self.user)
+                response = self.client.patch(
+                    f"/api/documents/{doc.pk}/",
+                    {"tags": [] if grant else [inbox.pk]},
+                    format="json",
+                )
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.client.force_authenticate(viewer)
+                self.assertEqual(
+                    self.client.get(f"/api/documents/{doc.pk}/").status_code,
+                    status.HTTP_200_OK if grant else status.HTTP_404_NOT_FOUND,
+                )
+                # Check the index directly: the API's DB permission filtering
+                # would otherwise hide stale grants and trashed index entries.
+                self.assertEqual(
+                    list(backend.search_ids("distinctiveword", user=viewer)),
+                    [doc.pk] if grant else [],
+                )
+                if grant:
+                    response = self.client.get(
+                        "/api/documents/",
+                        {"query": "distinctiveword AND title:workflow"},
+                    )
+                    self.assertEqual(response.status_code, status.HTTP_200_OK)
+                    self.assertEqual(
+                        [result["id"] for result in response.data["results"]],
+                        [doc.pk],
+                    )
+                elif action_type == WorkflowAction.WorkflowActionType.MOVE_TO_TRASH:
+                    self.assertFalse(Document.objects.filter(pk=doc.pk).exists())
+                    self.assertEqual(
+                        list(backend.search_ids("distinctiveword", user=None)),
+                        [],
+                    )
 
     def testDocuments(self) -> None:
         response = self.client.get("/api/documents/").data
@@ -1688,12 +1756,113 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
         }
         self.assertEqual(counts_by_field[custom_field.id], 1)
 
+    def test_selection_data_counts_with_shared_by_filter(self) -> None:
+        """
+        GIVEN:
+            - Several documents owned by one user with the same correspondent
+              and document type, only one of which is shared
+        WHEN:
+            - Requesting the document list filtered by shared_by__id with
+              include_selection_data=true
+        THEN:
+            - Counts reflect only the shared document, not every document the
+              owner has with that correspondent or document type, regardless of
+              the batch size
+        """
+        owner = User.objects.create_user(username="owner")
+        other = User.objects.create_user(username="other")
+        correspondent = Correspondent.objects.create(name="c1")
+        doc_type = DocumentType.objects.create(name="dt1")
+        tag = Tag.objects.create(name="tag")
+        docs = [
+            Document.objects.create(
+                checksum=str(i),
+                owner=owner,
+                correspondent=correspondent,
+                document_type=doc_type,
+            )
+            for i in range(3)
+        ]
+        for doc in docs:
+            doc.tags.add(tag)
+        grant_object(other, docs[0], "view_document")
+
+        for batch_size in (10_000, 1):
+            with (
+                self.subTest(batch_size=batch_size),
+                mock.patch.object(
+                    DocumentViewSet,
+                    "selection_data_batch_size",
+                    batch_size,
+                ),
+            ):
+                response = self.client.get(
+                    f"/api/documents/?shared_by__id={owner.id}"
+                    "&include_selection_data=true",
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(response.data["count"], 1)
+                selection_data = response.data["selection_data"]
+                for key, obj in (
+                    ("selected_correspondents", correspondent),
+                    ("selected_document_types", doc_type),
+                    ("selected_tags", tag),
+                ):
+                    counts = {
+                        item["id"]: item["document_count"]
+                        for item in selection_data[key]
+                    }
+                    self.assertEqual(counts[obj.id], 1, key)
+
+    def test_selection_data_counts_documents_once_when_filter_joins(self) -> None:
+        """
+        GIVEN:
+            - A document matching a multi-valued filter through two tags
+        WHEN:
+            - Requesting the document list with include_selection_data=true
+        THEN:
+            - The document is counted once per correspondent, not once per
+              matching tag, regardless of the batch size
+        """
+        correspondent = Correspondent.objects.create(name="c1")
+        tag_a = Tag.objects.create(name="a")
+        tag_b = Tag.objects.create(name="b")
+        both = Document.objects.create(checksum="1", correspondent=correspondent)
+        both.tags.add(tag_a, tag_b)
+        only_a = Document.objects.create(checksum="2", correspondent=correspondent)
+        only_a.tags.add(tag_a)
+
+        for batch_size in (10_000, 1):
+            with (
+                self.subTest(batch_size=batch_size),
+                mock.patch.object(
+                    DocumentViewSet,
+                    "selection_data_batch_size",
+                    batch_size,
+                ),
+            ):
+                response = self.client.get(
+                    f"/api/documents/?tags__id__in={tag_a.id},{tag_b.id}"
+                    "&include_selection_data=true",
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                counts = {
+                    item["id"]: item["document_count"]
+                    for item in response.data["selection_data"][
+                        "selected_correspondents"
+                    ]
+                }
+                self.assertEqual(counts[correspondent.id], 2)
+
     def test_statistics(self) -> None:
         doc1 = Document.objects.create(
             title="none1",
             checksum="A",
             mime_type="application/pdf",
             content="abc",
+            archive_serial_number=42,
         )
         Document.objects.create(
             title="none2",
@@ -1737,6 +1906,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
         self.assertEqual(response.data["correspondent_count"], 2)
         self.assertEqual(response.data["document_type_count"], 1)
         self.assertEqual(response.data["storage_path_count"], 2)
+        self.assertEqual(response.data["current_asn"], 42)
 
     def test_statistics_excludes_document_versions(self) -> None:
         root = Document.objects.create(
@@ -1744,6 +1914,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             checksum="A",
             mime_type="application/pdf",
             content="root",
+            archive_serial_number=42,
         )
         version = Document.objects.create(
             title="version",
@@ -1752,6 +1923,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             content="version",
             root_document=root,
             version_index=1,
+            archive_serial_number=99,
         )
         tag_inbox = Tag.objects.create(name="t1", is_inbox_tag=True)
         version.tags.add(tag_inbox)
@@ -1762,6 +1934,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
         self.assertEqual(response.data["documents_total"], 1)
         self.assertEqual(response.data["documents_inbox"], 0)
         self.assertEqual(response.data["character_count"], 4)
+        self.assertEqual(response.data["current_asn"], 42)
         self.assertEqual(
             response.data["document_file_type_counts"][0]["mime_type_count"],
             1,
@@ -1774,6 +1947,45 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["documents_inbox"], None)
         self.assertEqual(response.data["inbox_tags"], None)
+
+    def test_statistics_current_asn_respects_document_permissions(self) -> None:
+        viewer = UserFactory()
+        grant_global(viewer, "view_document")
+        DocumentFactory(owner=viewer, archive_serial_number=12)
+        shared = DocumentFactory(owner=self.user, archive_serial_number=23)
+        grant_object(viewer, shared, "view_document")
+        DocumentFactory(owner=self.user, archive_serial_number=99)
+
+        self.client.force_authenticate(user=viewer)
+        response = self.client.get("/api/statistics/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["current_asn"], 23)
+
+    def test_statistics_current_asn_without_visible_documents(self) -> None:
+        DocumentFactory(owner=self.user, archive_serial_number=99)
+
+        for permissions in ((), ("view_document",)):
+            viewer = UserFactory()
+            grant_global(viewer, *permissions)
+            self.client.force_authenticate(user=viewer)
+
+            with self.subTest(permissions=permissions):
+                response = self.client.get("/api/statistics/")
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(response.data["current_asn"], 0)
+
+    def test_statistics_current_asn_with_global_statistics_permission(self) -> None:
+        viewer = UserFactory()
+        grant_global(viewer, "view_global_statistics")
+        DocumentFactory(owner=self.user, archive_serial_number=99)
+
+        self.client.force_authenticate(user=viewer)
+        response = self.client.get("/api/statistics/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["current_asn"], 99)
 
     def test_statistics_multiple_users(self) -> None:
         """
@@ -1852,7 +2064,11 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             id=str(uuid.uuid4()),
         )
 
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SimpleUploadedFile(
+            "simple.pdf",
+            SIMPLE_DIGITAL_PDF.read_bytes(),
+            content_type="application/pdf",
+        ) as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {"document": f},
@@ -1880,7 +2096,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
 
         payload = SimpleUploadedFile(
             "../../outside.pdf",
-            (Path(__file__).parent / "samples" / "simple.pdf").read_bytes(),
+            SIMPLE_DIGITAL_PDF.read_bytes(),
             content_type="application/pdf",
         )
 
@@ -1909,7 +2125,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             id=str(uuid.uuid4()),
         )
 
-        pdf_bytes = (Path(__file__).parent / "samples" / "simple.pdf").read_bytes()
+        pdf_bytes = SIMPLE_DIGITAL_PDF.read_bytes()
         boundary = "paperless-boundary"
         payload = (
             (
@@ -1985,7 +2201,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
     def test_upload_insufficient_permissions(self) -> None:
         self.client.force_authenticate(user=UserFactory(username="testuser2"))
 
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SIMPLE_DIGITAL_PDF.open("rb") as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {"document": f},
@@ -1998,7 +2214,11 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             id=str(uuid.uuid4()),
         )
 
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SimpleUploadedFile(
+            "simple.pdf",
+            SIMPLE_DIGITAL_PDF.read_bytes(),
+            content_type="application/pdf",
+        ) as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {
@@ -2031,7 +2251,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             id=str(uuid.uuid4()),
         )
 
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SIMPLE_DIGITAL_PDF.open("rb") as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {"documenst": f},
@@ -2057,7 +2277,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             id=str(uuid.uuid4()),
         )
 
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SIMPLE_DIGITAL_PDF.open("rb") as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {"document": f, "title": "my custom title"},
@@ -2077,7 +2297,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
         )
 
         c = Correspondent.objects.create(name="test-corres")
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SIMPLE_DIGITAL_PDF.open("rb") as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {"document": f, "correspondent": c.id},
@@ -2096,7 +2316,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             id=str(uuid.uuid4()),
         )
 
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SIMPLE_DIGITAL_PDF.open("rb") as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {"document": f, "correspondent": 3456},
@@ -2111,7 +2331,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
         )
 
         dt = DocumentType.objects.create(name="invoice")
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SIMPLE_DIGITAL_PDF.open("rb") as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {"document": f, "document_type": dt.id},
@@ -2130,7 +2350,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             id=str(uuid.uuid4()),
         )
 
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SIMPLE_DIGITAL_PDF.open("rb") as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {"document": f, "document_type": 34578},
@@ -2145,7 +2365,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
         )
 
         sp = StoragePath.objects.create(name="invoices")
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SIMPLE_DIGITAL_PDF.open("rb") as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {"document": f, "storage_path": sp.id},
@@ -2164,7 +2384,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             id=str(uuid.uuid4()),
         )
 
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SIMPLE_DIGITAL_PDF.open("rb") as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {"document": f, "storage_path": 34578},
@@ -2180,7 +2400,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
 
         t1 = Tag.objects.create(name="tag1")
         t2 = Tag.objects.create(name="tag2")
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SIMPLE_DIGITAL_PDF.open("rb") as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {"document": f, "tags": [t2.id, t1.id]},
@@ -2201,7 +2421,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
 
         t1 = Tag.objects.create(name="tag1")
         t2 = Tag.objects.create(name="tag2")
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SIMPLE_DIGITAL_PDF.open("rb") as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {"document": f, "tags": [t2.id, t1.id, 734563]},
@@ -2225,7 +2445,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             0,
             tzinfo=zoneinfo.ZoneInfo("America/Los_Angeles"),
         )
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SIMPLE_DIGITAL_PDF.open("rb") as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {"document": f, "created": created},
@@ -2241,7 +2461,11 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             id=str(uuid.uuid4()),
         )
 
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SimpleUploadedFile(
+            "simple.pdf",
+            SIMPLE_DIGITAL_PDF.read_bytes(),
+            content_type="application/pdf",
+        ) as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {"document": f, "archive_serial_number": 500},
@@ -2268,7 +2492,11 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             data_type=CustomField.FieldDataType.STRING,
         )
 
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SimpleUploadedFile(
+            "simple.pdf",
+            SIMPLE_DIGITAL_PDF.read_bytes(),
+            content_type="application/pdf",
+        ) as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {
@@ -2323,7 +2551,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
         w1.actions.add(action1)
         w1.save()
 
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SIMPLE_DIGITAL_PDF.open("rb") as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {
@@ -2364,7 +2592,11 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             data_type=CustomField.FieldDataType.INT,
         )
 
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SimpleUploadedFile(
+            "simple.pdf",
+            SIMPLE_DIGITAL_PDF.read_bytes(),
+            content_type="application/pdf",
+        ) as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {
@@ -2413,7 +2645,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
         ]
 
         for payload in error_payloads:
-            with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+            with SIMPLE_DIGITAL_PDF.open("rb") as f:
                 data = {"document": f, **payload}
                 response = self.client.post(
                     "/api/documents/post_document/",
@@ -2471,7 +2703,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             id=str(uuid.uuid4()),
         )
 
-        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+        with SIMPLE_DIGITAL_PDF.open("rb") as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {"document": f, "from_webui": True},
@@ -2510,14 +2742,8 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             archive_filename="archive.pdf",
         )
 
-        source_file: Path = (
-            Path(__file__).parent
-            / "samples"
-            / "documents"
-            / "thumbnails"
-            / "0000001.webp"
-        )
-        archive_file: Path = Path(__file__).parent / "samples" / "simple.pdf"
+        source_file: Path = THUMBNAIL_WEBP
+        archive_file: Path = SIMPLE_DIGITAL_PDF
 
         shutil.copy(source_file, doc.source_path)
         shutil.copy(archive_file, doc.archive_path)
@@ -2550,7 +2776,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             mime_type="application/pdf",
         )
 
-        shutil.copy(Path(__file__).parent / "samples" / "simple.pdf", doc.source_path)
+        shutil.copy(SIMPLE_DIGITAL_PDF, doc.source_path)
 
         response = self.client.get(f"/api/documents/{doc.pk}/metadata/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -2605,7 +2831,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
         response = self.client.get("/api/documents/34676/suggestions/")
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
-    @mock.patch("documents.views.get_ai_document_classification")
+    @mock.patch("paperless_ai.ai_classifier.get_ai_document_classification")
     @override_settings(AI_ENABLED=True)
     def test_suggestions_still_uses_classifier_when_ai_enabled(
         self,
@@ -3463,6 +3689,7 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             {
                 "id": note.id,
                 "note": note.note,
+                "format": Note.Format.PLAIN,
                 "user": {
                     "id": note.user.id,
                     "username": note.user.username,
@@ -3511,10 +3738,63 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
         resp_data = resp_data[0]
 
         self.assertEqual(resp_data["note"], "this is a posted note")
+        self.assertEqual(resp_data["format"], Note.Format.PLAIN)
 
         doc = Document.objects.get(pk=doc.pk)
         # modified was updated to today
         self.assertEqual(doc.modified.day, timezone.now().day)
+
+    def test_create_markdown_note(self) -> None:
+        doc = DocumentFactory(
+            title="test",
+            content="this is a document which will have a markdown note",
+        )
+
+        response = self.client.post(
+            f"/api/documents/{doc.pk}/notes/",
+            data={"note": "**markdown**", "format": Note.Format.MARKDOWN},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        note = Note.objects.get(document=doc)
+        self.assertEqual(note.format, Note.Format.MARKDOWN)
+
+        response = self.client.get(f"/api/documents/{doc.pk}/notes/", format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()[0]["format"], Note.Format.MARKDOWN)
+
+    def test_create_note_rejects_unsupported_format(self) -> None:
+        doc = DocumentFactory(
+            title="test",
+            content="this is a document which will have a note",
+        )
+
+        response = self.client.post(
+            f"/api/documents/{doc.pk}/notes/",
+            data={"note": "unsupported", "format": "html"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("format", response.json())
+        self.assertFalse(Note.objects.filter(document=doc).exists())
+
+    def test_create_note_requires_note(self) -> None:
+        doc = DocumentFactory(
+            title="test",
+            content="this is a document which will have a note",
+        )
+
+        response = self.client.post(
+            f"/api/documents/{doc.pk}/notes/",
+            data={"format": Note.Format.MARKDOWN},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("note", response.json())
+        self.assertFalse(Note.objects.filter(document=doc).exists())
 
     def test_create_note_only_saves_document_modified_field(self) -> None:
         """
@@ -3652,6 +3932,34 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             f"/api/documents/{doc.pk}/notes/?id={note.pk}",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_notes_head_and_unsupported_methods(self) -> None:
+        """
+        GIVEN:
+            - A user allowed to view notes on their own document
+        WHEN:
+            - The notes endpoint is requested with HEAD, PUT and PATCH
+        THEN:
+            - HEAD is allowed like GET
+            - PUT and PATCH are rejected with 403 rather than a server error
+        """
+        user = UserFactory()
+        grant_global(user, "view_note", "view_document")
+        doc = DocumentFactory(owner=user)
+        self.client.force_authenticate(user)
+
+        self.assertEqual(
+            self.client.head(f"/api/documents/{doc.pk}/notes/").status_code,
+            status.HTTP_200_OK,
+        )
+        self.assertEqual(
+            self.client.put(f"/api/documents/{doc.pk}/notes/").status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        self.assertEqual(
+            self.client.patch(f"/api/documents/{doc.pk}/notes/").status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
 
     def test_delete_note(self) -> None:
         """
@@ -4288,8 +4596,8 @@ class TestDocumentApi(DirectoriesMixin, ConsumeTaskMixin, APITestCase):
             filename="test2.pdf",
         )
 
-        archive_file = Path(__file__).parent / "samples" / "simple.pdf"
-        source_file = Path(__file__).parent / "samples" / "simple.pdf"
+        archive_file = SIMPLE_DIGITAL_PDF
+        source_file = SIMPLE_DIGITAL_PDF
 
         shutil.copy(archive_file, doc.archive_path)
         shutil.copy(source_file, doc2.source_path)

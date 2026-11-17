@@ -178,7 +178,7 @@ class TestWorkflows(
         self.assertEqual(action.__str__(), "WorkflowAction 1")
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
 
@@ -290,7 +290,7 @@ class TestWorkflows(
         w.save()
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
 
@@ -409,7 +409,7 @@ class TestWorkflows(
         w2.save()
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
 
@@ -478,7 +478,7 @@ class TestWorkflows(
         w.save()
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
 
@@ -531,7 +531,7 @@ class TestWorkflows(
         w.save()
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
 
@@ -608,7 +608,7 @@ class TestWorkflows(
         w.save()
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
 
@@ -687,7 +687,7 @@ class TestWorkflows(
         w.save()
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
 
@@ -765,7 +765,7 @@ class TestWorkflows(
         w.save()
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
 
@@ -876,7 +876,7 @@ class TestWorkflows(
         w.save()
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
 
@@ -928,7 +928,7 @@ class TestWorkflows(
         generated = generate_unique_filename(doc)
         destination = (settings.ORIGINALS_DIR / generated).resolve()
         create_source_path_directory(destination)
-        shutil.copy(self.SAMPLE_DIR / "simple.pdf", destination)
+        shutil.copy(self.SIMPLE_PDF, destination)
         Document.objects.filter(pk=doc.pk).update(filename=generated.as_posix())
         doc.refresh_from_db()
 
@@ -1846,6 +1846,50 @@ class TestWorkflows(
             expected_str = f"Document storage path {doc.storage_path} does not match {trigger.filter_has_storage_path}"
             self.assertIn(expected_str, cm.output[1])
 
+    def test_title_custom_fields(self) -> None:
+        from documents.consumer import ConsumerPlugin
+        from documents.templating.workflows import validate_workflow_template
+
+        field = CustomField.objects.create(
+            name="Invoice",
+            data_type=CustomField.FieldDataType.STRING,
+        )
+        template = '{{ custom_fields.Invoice.value }} {{ custom_fields | get_cf_value("Missing", "fallback") }}'
+        validate_workflow_template(template)
+        consumer = mock.Mock(
+            filename="invoice.pdf",
+            metadata=DocumentMetadataOverrides(custom_fields={field.pk: "INV-123"}),
+        )
+        self.assertEqual(
+            ConsumerPlugin._parse_title_placeholders(consumer, template),
+            "INV-123 fallback",
+        )
+        trigger = WorkflowTrigger.objects.create(
+            type=WorkflowTrigger.WorkflowTriggerType.DOCUMENT_ADDED,
+        )
+        action = WorkflowAction.objects.create(assign_title=template)
+        doc = Document.objects.create(title="Original")
+        action.assign_custom_fields.add(field)
+        action.assign_custom_fields_values = {str(field.pk): "INV-123"}
+        action.save()
+        workflow = Workflow.objects.create(name="Custom field title", order=0)
+        workflow.triggers.add(trigger)
+        workflow.actions.add(action)
+
+        document_consumption_finished.send(sender=self.__class__, document=doc)
+
+        doc.refresh_from_db()
+        self.assertEqual(doc.title, "INV-123 fallback")
+
+        # Existing fields remain available when the action assigns no custom fields.
+        action.assign_custom_fields.clear()
+        CustomFieldInstance.objects.filter(document=doc, field=field).update(
+            value_text="INV-456",
+        )
+        document_consumption_finished.send(sender=self.__class__, document=doc)
+        doc.refresh_from_db()
+        self.assertEqual(doc.title, "INV-456 fallback")
+
     def test_document_added_invalid_title_placeholders(self) -> None:
         """
         GIVEN:
@@ -2023,7 +2067,7 @@ class TestWorkflows(
         superuser = UserFactory(username="superuser", superuser=True)
         self.client.force_authenticate(user=superuser)
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
         tasks.consume_file(
@@ -2243,6 +2287,92 @@ class TestWorkflows(
 
         doc.refresh_from_db()
         self.assertEqual(doc.owner, self.user2)
+
+    def _make_manual_workflow(self, *, require_tag: Tag | None = None) -> Workflow:
+        trigger = WorkflowTrigger.objects.create(
+            type=WorkflowTrigger.WorkflowTriggerType.MANUAL,
+        )
+        if require_tag is not None:
+            trigger.filter_has_all_tags.add(require_tag)
+        action = WorkflowAction.objects.create(assign_owner=self.user2)
+        workflow = Workflow.objects.create(name="Manual workflow", order=0)
+        workflow.triggers.add(trigger)
+        workflow.actions.add(action)
+        return workflow
+
+    @mock.patch("documents.tasks.send_websocket_document_updated")
+    def test_manual_workflow_run_applies_and_notifies(self, mock_ws) -> None:
+        """A manual run applies the workflow's actions and pushes a websocket update."""
+        workflow = self._make_manual_workflow()
+        doc = DocumentFactory()
+
+        tasks.run_workflows_for_documents([doc.pk], workflow.pk)
+
+        doc.refresh_from_db()
+        self.assertEqual(doc.owner, self.user2)
+        self.assertEqual(mock_ws.call_args.kwargs["document"].pk, doc.pk)
+
+    def test_manual_workflow_run_respects_filters(self) -> None:
+        """With filter_documents=True, a document failing the trigger filters is skipped."""
+        workflow = self._make_manual_workflow(require_tag=self.t1)
+        doc = DocumentFactory()
+
+        tasks.run_workflows_for_documents([doc.pk], workflow.pk, filter_documents=True)
+
+        doc.refresh_from_db()
+        self.assertIsNone(doc.owner)
+
+    def test_manual_workflow_run_force_ignores_filters(self) -> None:
+        """With filter_documents=False, actions run regardless of the trigger filters."""
+        workflow = self._make_manual_workflow(require_tag=self.t1)
+        doc = DocumentFactory()
+
+        tasks.run_workflows_for_documents([doc.pk], workflow.pk, filter_documents=False)
+
+        doc.refresh_from_db()
+        self.assertEqual(doc.owner, self.user2)
+
+    def test_manual_workflow_run_missing_workflow(self) -> None:
+        """A workflow removed after queueing fails the task."""
+        doc = DocumentFactory()
+        with (
+            self.assertLogs("paperless.tasks", level="WARNING"),
+            self.assertRaises(Workflow.DoesNotExist),
+        ):
+            tasks.run_workflows_for_documents([doc.pk], 9999)
+
+    @mock.patch("documents.tasks.send_websocket_document_updated")
+    @mock.patch("documents.tasks.run_workflows")
+    def test_manual_workflow_run_continues_after_error(
+        self,
+        mock_run_workflows,
+        mock_ws,
+    ) -> None:
+        """A failure on one document does not abort the run for the others."""
+        workflow = self._make_manual_workflow()
+        doc1 = DocumentFactory()
+        doc2 = DocumentFactory()
+
+        def side_effect(*args, document, **kwargs):
+            if document.pk == doc1.pk:
+                raise Exception("boom")
+
+        mock_run_workflows.side_effect = side_effect
+
+        with (
+            self.assertLogs("paperless.tasks", level="ERROR"),
+            self.assertRaisesMessage(
+                RuntimeError,
+                f"failed for document(s): [{doc1.pk}]",
+            ),
+        ):
+            tasks.run_workflows_for_documents([doc1.pk, doc2.pk], workflow.pk)
+
+        # Both documents were attempted; the websocket update only fired for the
+        # one that did not raise.
+        self.assertEqual(mock_run_workflows.call_count, 2)
+        ws_doc_ids = [c.kwargs["document"].pk for c in mock_ws.call_args_list]
+        self.assertEqual(ws_doc_ids, [doc2.pk])
 
     @mock.patch("documents.tasks.send_websocket_document_updated")
     def test_workflow_scheduled_trigger_sends_websocket_update(
@@ -3009,7 +3139,7 @@ class TestWorkflows(
         generated = generate_unique_filename(doc)
         destination = (settings.ORIGINALS_DIR / generated).resolve()
         create_source_path_directory(destination)
-        shutil.copy(self.SAMPLE_DIR / "simple.pdf", destination)
+        shutil.copy(self.SIMPLE_PDF, destination)
         Document.objects.filter(pk=doc.pk).update(filename=generated.as_posix())
         doc.refresh_from_db()
         doc.tags.set([self.t1, self.t2])
@@ -3073,7 +3203,7 @@ class TestWorkflows(
         generated = generate_unique_filename(doc)
         destination = (settings.ORIGINALS_DIR / generated).resolve()
         create_source_path_directory(destination)
-        shutil.copy(self.SAMPLE_DIR / "simple.pdf", destination)
+        shutil.copy(self.SIMPLE_PDF, destination)
         Document.objects.filter(pk=doc.pk).update(filename=generated.as_posix())
         doc.refresh_from_db()
         doc.tags.set([self.t1])
@@ -3222,7 +3352,7 @@ class TestWorkflows(
         w.save()
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
 
@@ -3346,7 +3476,7 @@ class TestWorkflows(
         w.save()
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
 
@@ -3496,7 +3626,7 @@ class TestWorkflows(
         workflow.actions.set([assignment_action, email_action])
 
         temp_working_copy = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "working-copy.pdf",
         )
 
@@ -3596,7 +3726,7 @@ class TestWorkflows(
 
         # move the file
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
 
@@ -3704,7 +3834,7 @@ class TestWorkflows(
         generated = generate_unique_filename(doc)
         destination = (settings.ORIGINALS_DIR / generated).resolve()
         create_source_path_directory(destination)
-        shutil.copy(self.SAMPLE_DIR / "simple.pdf", destination)
+        shutil.copy(self.SIMPLE_PDF, destination)
         Document.objects.filter(pk=doc.pk).update(filename=generated.as_posix())
 
         run_workflows(WorkflowTrigger.WorkflowTriggerType.DOCUMENT_UPDATED, doc)
@@ -3915,7 +4045,7 @@ class TestWorkflows(
         w.save()
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
 
@@ -4036,7 +4166,7 @@ class TestWorkflows(
         w.save()
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
 
@@ -4387,7 +4517,7 @@ class TestWorkflows(
         w.save()
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
 
@@ -4835,7 +4965,7 @@ class TestWorkflows(
         w.save()
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
 
@@ -5027,7 +5157,7 @@ class TestWorkflows(
 
         # Create a test file to be consumed
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
         test_file_path = Path(test_file)
@@ -5091,7 +5221,7 @@ class TestWorkflows(
 
         # Create a test file to be consumed
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple2.pdf",
         )
         test_file_path = Path(test_file)
@@ -5118,6 +5248,72 @@ class TestWorkflows(
 
         # No document should be created
         self.assertEqual(Document.objects.count(), 0)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("use_overrides", [False, True])
+def test_custom_fields_in_email_and_webhook_templates(
+    use_overrides,
+    settings,
+    tmp_path,
+):
+    from documents.workflows.actions import build_workflow_action_context
+    from documents.workflows.actions import execute_email_action
+    from documents.workflows.actions import execute_webhook_action
+
+    settings.EMAIL_ENABLED = True
+    field = CustomField.objects.create(
+        name="Invoice",
+        data_type=CustomField.FieldDataType.STRING,
+    )
+    if use_overrides:
+        invoice = tmp_path / "invoice.pdf"
+        invoice.write_bytes(b"%PDF-1.7")
+        document = ConsumableDocument(
+            source=DocumentSource.ConsumeFolder,
+            original_file=invoice,
+        )
+        overrides = DocumentMetadataOverrides(custom_fields={field.pk: "INV-123"})
+    else:
+        document = Document.objects.create(title="Invoice")
+        CustomFieldInstance.objects.create(
+            document=document,
+            field=field,
+            value_text="INV-123",
+        )
+        overrides = None
+    context = build_workflow_action_context(document, overrides)
+    template = '{{ custom_fields.Invoice.value }} {{ custom_fields | get_cf_value("Missing", "fallback") }}'
+    action = WorkflowAction(
+        email=WorkflowActionEmail(
+            subject=template,
+            body=template,
+            to="test@example.com",
+        ),
+        webhook=WorkflowActionWebhook(
+            url="https://example.com",
+            body=template,
+        ),
+    )
+    with mock.patch("documents.workflows.actions.send_email") as send_email:
+        execute_email_action(
+            action,
+            document,
+            context,
+            None,
+            Path("invoice.pdf"),
+            WorkflowTrigger.WorkflowTriggerType.DOCUMENT_ADDED,
+        )
+    assert send_email.call_args.kwargs["subject"] == "INV-123 fallback"
+    assert send_email.call_args.kwargs["body"] == "INV-123 fallback"
+    with mock.patch("documents.workflows.actions.send_webhook.apply_async") as send:
+        for use_params in (False, True):
+            action.webhook.use_params = use_params
+            action.webhook.params = {"invoice": template}
+            execute_webhook_action(action, document, context, None, Path("invoice.pdf"))
+            assert send.call_args.kwargs["kwargs"]["data"] == (
+                {"invoice": "INV-123 fallback"} if use_params else "INV-123 fallback"
+            )
 
 
 class TestWebhookSend:
@@ -5529,7 +5725,7 @@ class TestDateWorkflowLocalization(
         )
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             tmp_path / "simple.pdf",
         )
 
@@ -5596,7 +5792,7 @@ class TestRemoteOCRWorkflowAction(DirectoriesMixin, SampleDirMixin, APITestCase)
         self._make_workflow(WorkflowTrigger.WorkflowTriggerType.CONSUMPTION)
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
         overrides = DocumentMetadataOverrides()
@@ -5814,7 +6010,7 @@ class TestApplyAISuggestionsWorkflowAction(
         )
 
         test_file = shutil.copy(
-            self.SAMPLE_DIR / "simple.pdf",
+            self.SIMPLE_PDF,
             self.dirs.scratch_dir / "simple.pdf",
         )
 
@@ -6175,6 +6371,50 @@ class TestApplyAISuggestionsWorkflowAction(
         self.apply(action)
 
         self.assertEqual(self.doc.tags.count(), 0)
+
+    def test_unowned_document_does_not_get_private_objects_by_id(self) -> None:
+        """
+        GIVEN:
+            - An unowned document
+            - AI suggestions selecting another user's private tag and
+              correspondent by ID, plus an unowned tag
+        WHEN:
+            - The suggestions are applied
+        THEN:
+            - Only the unowned tag is assigned; an unowned document must not
+              be treated as unrestricted
+        """
+        self.doc.owner = None
+        self.doc.save(update_fields=["owner"])
+        other = User.objects.create(username="someone-else")
+        private_tag = Tag.objects.create(name="Private Tag", owner=other)
+        public_tag = Tag.objects.create(name="Public Tag", owner=None)
+        private_correspondent = Correspondent.objects.create(
+            name="Private Correspondent",
+            owner=other,
+        )
+        action = self.make_action(
+            ai_suggestion_fields=[
+                WorkflowAction.AISuggestionField.TAGS,
+                WorkflowAction.AISuggestionField.CORRESPONDENT,
+            ],
+        )
+        suggestions: ClassificationSuggestions = {
+            **SUGGESTIONS,
+            "tags": {
+                "existing_ids": [private_tag.pk, public_tag.pk],
+                "new_names": [],
+            },
+            "correspondents": {
+                "existing_ids": [private_correspondent.pk],
+                "new_names": [],
+            },
+        }
+
+        self.apply(action, suggestions)
+
+        self.assertEqual(list(self.doc.tags.all()), [public_tag])
+        self.assertIsNone(self.doc.correspondent)
 
     def test_unparsable_dates_are_skipped(self) -> None:
         """

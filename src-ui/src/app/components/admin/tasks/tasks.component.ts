@@ -1,7 +1,7 @@
 import { JsonPipe, NgTemplateOutlet } from '@angular/common'
 import { Component, inject, OnDestroy, OnInit, signal } from '@angular/core'
 import { FormsModule, ReactiveFormsModule } from '@angular/forms'
-import { Router, RouterLink } from '@angular/router'
+import { ActivatedRoute, Router, RouterLink } from '@angular/router'
 import {
   NgbCollapseModule,
   NgbDropdownModule,
@@ -9,26 +9,34 @@ import {
   NgbPaginationModule,
   NgbPopoverModule,
 } from '@ng-bootstrap/ng-bootstrap'
-import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
 import {
   debounceTime,
   distinctUntilChanged,
   filter,
   first,
+  forkJoin,
+  map,
+  Observable,
   Subject,
   takeUntil,
   timer,
 } from 'rxjs'
+import { BootstrapIconComponent } from 'src/app/components/common/bootstrap-icon/bootstrap-icon.component'
 import {
   PaperlessTask,
   PaperlessTaskStatus,
   PaperlessTaskTriggerSource,
   PaperlessTaskType,
 } from 'src/app/data/paperless-task'
+import { Results } from 'src/app/data/results'
 import { IfPermissionsDirective } from 'src/app/directives/if-permissions.directive'
 import { CustomDatePipe } from 'src/app/pipes/custom-date.pipe'
 import { TasksService } from 'src/app/services/tasks.service'
 import { ToastService } from 'src/app/services/toast.service'
+import {
+  documentOperationHasFollowUpTasks,
+  getDocumentOperationLabel,
+} from 'src/app/utils/document-operation'
 import { ConfirmDialogComponent } from '../../common/confirm-dialog/confirm-dialog.component'
 import { PageHeaderComponent } from '../../common/page-header/page-header.component'
 import { LoadingComponentWithPermissions } from '../../loading-component/loading.component'
@@ -43,11 +51,13 @@ export enum TaskSection {
 export enum TaskFilterTargetID {
   Name,
   Result,
+  TaskId,
 }
 
 const FILTER_TARGETS = [
   { id: TaskFilterTargetID.Name, name: $localize`Name` },
   { id: TaskFilterTargetID.Result, name: $localize`Result` },
+  { id: TaskFilterTargetID.TaskId, name: $localize`Task ID` },
 ]
 
 const SECTION_LABELS = {
@@ -147,7 +157,7 @@ const TRIGGER_SOURCE_OPTIONS: Array<{
     NgbDropdownModule,
     NgbPaginationModule,
     NgbPopoverModule,
-    NgxBootstrapIconsModule,
+    BootstrapIconComponent,
   ],
 })
 export class TasksComponent
@@ -157,6 +167,7 @@ export class TasksComponent
   tasksService = inject(TasksService)
   private modalService = inject(NgbModal)
   private readonly router = inject(Router)
+  private readonly route = inject(ActivatedRoute)
   private readonly toastService = inject(ToastService)
 
   readonly TaskSection = TaskSection
@@ -169,6 +180,7 @@ export class TasksComponent
   public expandedTask: number
   public autoRefreshEnabled: boolean = true
   public readonly pageSize = 25
+  public readonly overviewSize = 10
   public page: number = 1
   readonly totalTasks = signal(0)
   readonly sectionCounts = signal<Record<TaskSection, number>>({
@@ -270,6 +282,17 @@ export class TasksComponent
   }
 
   ngOnInit() {
+    const taskId = this.route.snapshot.queryParamMap.get('task_id')
+    if (taskId) {
+      this.filterTargetID = TaskFilterTargetID.TaskId
+      this._filterText = taskId
+      this.router.navigate([], {
+        relativeTo: this.route,
+        queryParams: { task_id: null },
+        queryParamsHandling: 'merge',
+        replaceUrl: true,
+      })
+    }
     this.tasksService.reload()
     this.reloadPage()
     timer(5000, 5000)
@@ -395,11 +418,30 @@ export class TasksComponent
   }
 
   taskDisplayName(task: PaperlessTask): string {
-    return task.input_data?.filename?.toString() || task.task_type_display
+    const filename = task.input_data?.filename?.toString()
+    if (filename) return filename
+    const operation = this.taskOperationLabel(task)
+    const count = this.taskDocumentCount(task)
+    if (operation && count !== null && count > 1) {
+      return $localize`Bulk operation: ${operation}`
+    }
+    return operation || task.task_type_display
   }
 
   taskShowsSeparateTypeLabel(task: PaperlessTask): boolean {
-    return this.taskDisplayName(task) !== task.task_type_display
+    return (
+      !this.taskOperationLabel(task) &&
+      this.taskDisplayName(task) !== task.task_type_display
+    )
+  }
+
+  private taskOperationLabel(task: PaperlessTask): string | null {
+    return getDocumentOperationLabel(task.input_data?.operation)
+  }
+
+  taskDocumentCount(task: PaperlessTask): number | null {
+    const count = task.input_data?.document_count
+    return Number.isInteger(count) && count >= 0 ? count : null
   }
 
   taskResultMessage(task: PaperlessTask): string | null {
@@ -425,6 +467,15 @@ export class TasksComponent
     const errorMessage = task.result_data?.['error_message']
     if (typeof errorMessage === 'string') {
       return errorMessage
+    }
+
+    if (
+      task.status === PaperlessTaskStatus.Success &&
+      this.taskOperationLabel(task)
+    ) {
+      return documentOperationHasFollowUpTasks(task.input_data?.operation)
+        ? $localize`Submitted for processing`
+        : $localize`Completed`
     }
 
     return null
@@ -482,13 +533,6 @@ export class TasksComponent
 
   sectionCount(section: TaskSection): number {
     return this.sectionCounts()[section]
-  }
-
-  private setSectionCount(section: TaskSection, count: number) {
-    this.sectionCounts.update((counts) => ({
-      ...counts,
-      [section]: count,
-    }))
   }
 
   sectionShowsResults(section: TaskSection): boolean {
@@ -638,17 +682,12 @@ export class TasksComponent
 
     const query = this._filterText.toLowerCase()
 
-    if (this.filterTargetID == TaskFilterTargetID.Name) {
-      return [
-        this.taskDisplayName(task),
-        task.task_type_display,
-        task.trigger_source_display,
-      ]
-        .filter(Boolean)
-        .some((value) => value.toLowerCase().includes(query))
+    if (this.filterTargetID === TaskFilterTargetID.TaskId) {
+      return task.task_id.toLowerCase() === query
     }
 
-    return this.taskResultMessage(task)?.toLowerCase().includes(query) ?? false
+    // Text filtering now handled API-side
+    return true
   }
 
   private tasksForOptionCounts({
@@ -708,9 +747,15 @@ export class TasksComponent
     }
 
     if (this._filterText.length) {
-      params[
-        this.filterTargetID === TaskFilterTargetID.Name ? 'name' : 'result'
-      ] = this._filterText
+      const parameter = {
+        [TaskFilterTargetID.Name]: 'name',
+        [TaskFilterTargetID.Result]: 'result',
+        [TaskFilterTargetID.TaskId]: 'task_id',
+      }[this.filterTargetID]
+      params[parameter] = this._filterText
+      if (this.filterTargetID === TaskFilterTargetID.TaskId) {
+        delete params.acknowledged
+      }
     }
 
     return params
@@ -737,21 +782,12 @@ export class TasksComponent
     this.reloadSectionCounts()
 
     this.loading.set(true)
-    this.tasksService
-      .list(
-        this.page,
-        this.pageSize,
-        this.getParamsForSection(this.selectedSection)
-      )
+    this.listTasks()
       .pipe(first(), takeUntil(this.unsubscribeNotifier))
       .subscribe({
         next: (result) => {
           this.pagedTasks.set(result.results)
           this.totalTasks.set(result.count)
-          this.setSectionCount(TaskSection.All, result.count)
-          if (this.selectedSection !== TaskSection.All) {
-            this.setSectionCount(this.selectedSection, result.count)
-          }
           this.loading.set(false)
           if (
             this.page > 1 &&
@@ -766,5 +802,31 @@ export class TasksComponent
           this.loading.set(false)
         },
       })
+  }
+
+  private listTasks(): Observable<Results<PaperlessTask>> {
+    if (this.selectedSection !== TaskSection.All) {
+      return this.tasksService.list(
+        this.page,
+        this.pageSize,
+        this.getParamsForSection(this.selectedSection)
+      )
+    }
+
+    // All is an overview of each section to avoid splitting sections across pages
+    return forkJoin(
+      this.sections.map((section) =>
+        this.tasksService.list(
+          1,
+          this.overviewSize,
+          this.getParamsForSection(section)
+        )
+      )
+    ).pipe(
+      map((results) => ({
+        count: results.reduce((sum, result) => sum + result.count, 0),
+        results: results.flatMap((result) => result.results),
+      }))
+    )
   }
 }

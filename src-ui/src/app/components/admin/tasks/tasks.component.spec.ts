@@ -7,11 +7,15 @@ import {
 import { ComponentFixture, TestBed } from '@angular/core/testing'
 import { FormsModule } from '@angular/forms'
 import { By } from '@angular/platform-browser'
-import { Router } from '@angular/router'
+import {
+  ActivatedRoute,
+  convertToParamMap,
+  ParamMap,
+  Router,
+} from '@angular/router'
 import { RouterTestingModule } from '@angular/router/testing'
 import { NgbModal, NgbModalRef, NgbModule } from '@ng-bootstrap/ng-bootstrap'
-import { allIcons, NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
-import { of, throwError } from 'rxjs'
+import { BehaviorSubject, of, throwError } from 'rxjs'
 import { routes } from 'src/app/app-routing.module'
 import {
   PaperlessTask,
@@ -19,7 +23,6 @@ import {
   PaperlessTaskTriggerSource,
   PaperlessTaskType,
 } from 'src/app/data/paperless-task'
-import { Results } from 'src/app/data/results'
 import { IfPermissionsDirective } from 'src/app/directives/if-permissions.directive'
 import { PermissionsGuard } from 'src/app/guards/permissions.guard'
 import { CustomDatePipe } from 'src/app/pipes/custom-date.pipe'
@@ -153,11 +156,6 @@ const tasks: PaperlessTask[] = [
   },
 ]
 
-const paginatedTasks: Results<PaperlessTask> = {
-  count: tasks.length,
-  results: tasks,
-}
-
 const sectionCountResponse = {
   all: 7,
   needs_attention: 2,
@@ -166,6 +164,7 @@ const sectionCountResponse = {
 }
 
 describe('TasksComponent', () => {
+  let queryParams: BehaviorSubject<ParamMap>
   let component: TasksComponent
   let fixture: ComponentFixture<TasksComponent>
   let tasksService: TasksService
@@ -176,11 +175,11 @@ describe('TasksComponent', () => {
   let toastService: ToastService
 
   beforeEach(async () => {
+    queryParams = new BehaviorSubject(convertToParamMap({}))
     TestBed.configureTestingModule({
       imports: [
         NgbModule,
         RouterTestingModule.withRoutes(routes),
-        NgxBootstrapIconsModule.pick(allIcons),
         FormsModule,
         TasksComponent,
         PageHeaderComponent,
@@ -189,6 +188,17 @@ describe('TasksComponent', () => {
         ConfirmDialogComponent,
       ],
       providers: [
+        {
+          provide: ActivatedRoute,
+          useValue: {
+            queryParamMap: queryParams.asObservable(),
+            snapshot: {
+              get queryParamMap() {
+                return queryParams.value
+              },
+            },
+          },
+        },
         {
           provide: PermissionsService,
           useValue: {
@@ -204,7 +214,7 @@ describe('TasksComponent', () => {
     }).compileComponents()
 
     tasksService = TestBed.inject(TasksService)
-    reloadSpy = jest.spyOn(tasksService, 'reload')
+    reloadSpy = jest.spyOn(tasksService, 'reload').mockImplementation(() => {})
     httpTestingController = TestBed.inject(HttpTestingController)
     modalService = TestBed.inject(NgbModal)
     router = TestBed.inject(Router)
@@ -217,30 +227,104 @@ describe('TasksComponent', () => {
     httpTestingController
       .expectOne(
         (req) =>
-          req.url === `${environment.apiBaseUrl}tasks/` &&
-          req.params.get('acknowledged') === 'false' &&
-          req.params.get('page_size') === '1000'
-      )
-      .flush(paginatedTasks)
-
-    httpTestingController
-      .expectOne(
-        (req) =>
-          req.url === `${environment.apiBaseUrl}tasks/` &&
-          req.params.get('acknowledged') === 'false' &&
-          req.params.get('page_size') === '25' &&
-          req.params.get('page') === '1'
-      )
-      .flush(paginatedTasks)
-
-    httpTestingController
-      .expectOne(
-        (req) =>
           req.url === `${environment.apiBaseUrl}tasks/status_counts/` &&
           req.params.get('acknowledged') === 'false' &&
           !req.params.has('status')
       )
       .flush(sectionCountResponse)
+
+    flushTaskLists(10)
+  })
+
+  // answers task list requests with the fixture tasks matching their status filter
+  function flushTaskLists(
+    pageSize: number,
+    count?: number,
+    filteredTasks: PaperlessTask[] = tasks
+  ) {
+    httpTestingController
+      .match(
+        (req) =>
+          req.url === `${environment.apiBaseUrl}tasks/` &&
+          req.params.get('page_size') === `${pageSize}`
+      )
+      .forEach((req) => {
+        const statuses = req.request.params.getAll('status')
+        const results = filteredTasks.filter((task) =>
+          statuses.includes(task.status)
+        )
+        req.flush({ count: count ?? results.length, results })
+      })
+  }
+
+  function selectSection(section: TaskSection, count: number) {
+    component.setSection(section)
+    flushTaskLists(25, count)
+  }
+
+  it('consumes a task link on load into the normal resettable Task ID filter', () => {
+    jest
+      .spyOn(tasksService, 'list')
+      .mockReturnValue(of({ count: 0, results: [] }))
+    jest
+      .spyOn(tasksService, 'statusCounts')
+      .mockReturnValue(of(sectionCountResponse))
+    jest.spyOn(router, 'navigate').mockResolvedValue(true)
+    queryParams.next(convertToParamMap({ task_id: 'linked-task' }))
+    fixture.destroy()
+    fixture = TestBed.createComponent(TasksComponent)
+    component = fixture.componentInstance
+    fixture.detectChanges()
+    expect(router.navigate).toHaveBeenCalledTimes(1)
+    expect(router.navigate).toHaveBeenCalledWith(
+      [],
+      expect.objectContaining({
+        queryParams: { task_id: null },
+        replaceUrl: true,
+      })
+    )
+    expect(component.filterTargetName).toBe('Task ID')
+    expect(component.filterText).toBe('linked-task')
+    expect(component.isFiltered).toBe(true)
+    component.setSection(TaskSection.InProgress)
+    expect(tasksService.list).toHaveBeenLastCalledWith(1, 25, {
+      task_id: 'linked-task',
+      status: [PaperlessTaskStatus.Pending, PaperlessTaskStatus.Started],
+    })
+    component.resetFilters()
+    expect(component.filterText).toBe('')
+    expect(component.isFiltered).toBe(false)
+    expect(tasksService.list).toHaveBeenLastCalledWith(1, 25, {
+      acknowledged: false,
+      status: [PaperlessTaskStatus.Pending, PaperlessTaskStatus.Started],
+    })
+    expect(router.navigate).toHaveBeenCalledTimes(1)
+  })
+
+  it('supports manually filtering by Task ID and clearing the text filter', () => {
+    jest
+      .spyOn(tasksService, 'list')
+      .mockReturnValue(of({ count: 0, results: [] }))
+    jest
+      .spyOn(tasksService, 'statusCounts')
+      .mockReturnValue(of(sectionCountResponse))
+    component.setSection(TaskSection.InProgress)
+    component.setFilterTarget(TaskFilterTargetID.TaskId)
+    component.filterText = tasks[0].task_id
+    jest.advanceTimersByTime(150)
+    expect(tasksService.list).toHaveBeenLastCalledWith(1, 25, {
+      task_id: tasks[0].task_id,
+      status: [PaperlessTaskStatus.Pending, PaperlessTaskStatus.Started],
+    })
+    component.pagedTasks.set(tasks)
+    expect(component.tasksForSection(TaskSection.NeedsAttention)).toEqual([
+      tasks[0],
+    ])
+    component.resetFilter()
+    expect(tasksService.list).toHaveBeenLastCalledWith(1, 25, {
+      acknowledged: false,
+      status: [PaperlessTaskStatus.Pending, PaperlessTaskStatus.Started],
+    })
   })
 
   it('should display task sections with counts', () => {
@@ -338,6 +422,7 @@ describe('TasksComponent', () => {
   })
 
   it('should render pagination controls next to the task filter', () => {
+    selectSection(TaskSection.Completed, 30)
     fixture.detectChanges()
 
     const controls = fixture.debugElement.query(By.css('.task-controls'))
@@ -346,6 +431,51 @@ describe('TasksComponent', () => {
 
     expect(search).not.toBeNull()
     expect(pagination).not.toBeNull()
+  })
+
+  it('should only paginate a section with more than one page of tasks', () => {
+    const pagination = () =>
+      fixture.debugElement.query(By.css('ngb-pagination'))
+
+    fixture.detectChanges()
+    expect(pagination()).toBeNull()
+
+    selectSection(TaskSection.Completed, 2)
+    fixture.detectChanges()
+    expect(pagination()).toBeNull()
+  })
+
+  it('should load the all tasks overview one section at a time', () => {
+    expect(component.tasksForSection(TaskSection.NeedsAttention)).toHaveLength(
+      2
+    )
+    expect(component.tasksForSection(TaskSection.InProgress)).toHaveLength(3)
+    expect(component.tasksForSection(TaskSection.Completed)).toHaveLength(2)
+    expect(component.totalTasks()).toBe(7)
+  })
+
+  it('should show section totals and link truncated sections to their full list', () => {
+    component.sectionCounts.update((counts) => ({
+      ...counts,
+      [TaskSection.Completed]: 27,
+    }))
+    fixture.detectChanges()
+
+    const header = (label: string) =>
+      fixture.debugElement
+        .queryAll(By.css('.section-header'))
+        .find((h) => h.nativeElement.textContent.includes(label))
+
+    expect(header('Needs attention').nativeElement.textContent).toContain(
+      '2 tasks'
+    )
+    expect(header('Needs attention').query(By.css('button'))).toBeNull()
+
+    expect(header('Recently completed').nativeElement.textContent).toContain(
+      '2 of 27 tasks'
+    )
+    header('Recently completed').query(By.css('button')).nativeElement.click()
+    expect(component.selectedSection).toBe(TaskSection.Completed)
   })
 
   it('should apply the selected section to the server-side task query', () => {
@@ -368,55 +498,56 @@ describe('TasksComponent', () => {
   it('should apply task type and trigger source filters to the server-side task query', () => {
     component.setTaskType(PaperlessTaskType.SanityCheck)
 
-    httpTestingController
-      .expectOne(
+    expect(
+      httpTestingController.match(
         (request) =>
           request.url === `${environment.apiBaseUrl}tasks/` &&
-          request.params.get('page_size') === '25' &&
+          request.params.get('page_size') === '10' &&
           request.params.get('task_type') === PaperlessTaskType.SanityCheck
       )
-      .flush({ count: 1, results: [tasks[6]] })
+    ).toHaveLength(3)
 
     component.setTriggerSource(PaperlessTaskTriggerSource.System)
 
-    httpTestingController
-      .expectOne(
+    expect(
+      httpTestingController.match(
         (request) =>
           request.url === `${environment.apiBaseUrl}tasks/` &&
-          request.params.get('page_size') === '25' &&
+          request.params.get('page_size') === '10' &&
           request.params.get('task_type') === PaperlessTaskType.SanityCheck &&
           request.params.get('trigger_source') ===
             PaperlessTaskTriggerSource.System
       )
-      .flush({ count: 1, results: [tasks[6]] })
+    ).toHaveLength(3)
   })
 
   it('should apply text filters to the server-side task query', () => {
     component.filterText = 'invoice'
     jest.advanceTimersByTime(150)
 
-    httpTestingController
-      .expectOne(
+    expect(
+      httpTestingController.match(
         (request) =>
           request.url === `${environment.apiBaseUrl}tasks/` &&
-          request.params.get('page_size') === '25' &&
+          request.params.get('page_size') === '10' &&
           request.params.get('name') === 'invoice'
       )
-      .flush({ count: 1, results: [tasks[0]] })
+    ).toHaveLength(3)
 
     component.setFilterTarget(TaskFilterTargetID.Result)
 
-    httpTestingController
-      .expectOne(
+    expect(
+      httpTestingController.match(
         (request) =>
           request.url === `${environment.apiBaseUrl}tasks/` &&
-          request.params.get('page_size') === '25' &&
+          request.params.get('page_size') === '10' &&
           request.params.get('result') === 'invoice'
       )
-      .flush({ count: 0, results: [] })
+    ).toHaveLength(3)
   })
 
   it('should load a different task page when pagination changes', () => {
+    selectSection(TaskSection.Completed, 30)
     component.setPage(2)
 
     const pageTwoTasks = {
@@ -440,6 +571,7 @@ describe('TasksComponent', () => {
   })
 
   it('should not replace section counts with current-page counts', () => {
+    selectSection(TaskSection.Completed, 30)
     component.setPage(2)
 
     httpTestingController
@@ -455,9 +587,19 @@ describe('TasksComponent', () => {
         results: [tasks[0]],
       })
 
+    expect(component.sectionCount(TaskSection.All)).toBe(7)
     expect(component.sectionCount(TaskSection.NeedsAttention)).toBe(2)
     expect(component.sectionCount(TaskSection.InProgress)).toBe(3)
     expect(component.sectionCount(TaskSection.Completed)).toBe(2)
+  })
+
+  it('should stop loading when the overview fails to load', () => {
+    component.setSection(TaskSection.All)
+    httpTestingController
+      .match((req) => req.params.get('page_size') === '10')[0]
+      .flush('', { status: 500, statusText: 'Error' })
+
+    expect(component.loading()).toBe(false)
   })
 
   it('should expose stable task type options and disable empty ones', () => {
@@ -718,6 +860,7 @@ describe('TasksComponent', () => {
     input.nativeElement.value = '191092'
     input.nativeElement.dispatchEvent(new Event('input'))
     jest.advanceTimersByTime(150)
+    flushTaskLists(10, undefined, [tasks[1]])
     fixture.detectChanges()
     expect(component.filterText).toEqual('191092')
     expect(component.tasksForSection(TaskSection.NeedsAttention)).toHaveLength(
@@ -729,6 +872,7 @@ describe('TasksComponent', () => {
     component.setSection(TaskSection.InProgress)
     component.filterText = 'system'
     jest.advanceTimersByTime(150)
+    flushTaskLists(25, undefined, [tasks[6]])
 
     expect(component.tasksForSection(TaskSection.InProgress)).toHaveLength(1)
     expect(component.tasksForSection(TaskSection.InProgress)[0].task_type).toBe(
@@ -751,6 +895,117 @@ describe('TasksComponent', () => {
     expect(sanityTaskRow.nativeElement.textContent).toContain('System')
   })
 
+  it.each([
+    ['modify_tags', 12, 'Bulk operation: Update tags', '(12 documents)'],
+    ['run_workflow', 1, 'Run workflow', null],
+    ['delete', 3, 'Bulk operation: Move to trash', '(3 documents)'],
+    ['reprocess', 2, 'Bulk operation: Document reprocessing', '(2 documents)'],
+  ])(
+    'shows the operation, document count and outcome for %s',
+    (operation, count, label, summary) => {
+      const task: PaperlessTask = {
+        ...tasks[4],
+        task_type:
+          operation === 'delete'
+            ? PaperlessTaskType.BulkDelete
+            : PaperlessTaskType.BulkUpdate,
+        task_type_display:
+          operation === 'delete' ? 'Bulk Delete' : 'Bulk Update',
+        trigger_source: PaperlessTaskTriggerSource.WebUI,
+        trigger_source_display: 'Web UI',
+        input_data: { operation, document_count: count },
+        result_data: { operation, document_count: count },
+      }
+      component.setSection(TaskSection.Completed)
+      flushTaskLists(25, 1, [task])
+      fixture.detectChanges()
+
+      const name = fixture.nativeElement.querySelector('tbody .name-col')
+      expect(name.textContent).toContain(label)
+      const countLabel = name.querySelector('small.text-muted')
+      if (summary) {
+        expect(countLabel.textContent).toContain(summary)
+      } else {
+        expect(countLabel).toBeNull()
+        expect(name.textContent).not.toContain('Bulk operation:')
+      }
+      expect(name.textContent).not.toContain('·')
+      expect(name.textContent).toContain('Web UI')
+      expect(name.textContent).not.toContain(task.task_type_display)
+      expect(
+        name.closest('tr').querySelector('.results-col').textContent
+      ).toContain(
+        [
+          'reprocess',
+          'rotate',
+          'merge',
+          'split',
+          'delete_pages',
+          'edit_pdf',
+          'remove_password',
+        ].includes(operation)
+          ? 'Submitted for processing'
+          : 'Completed'
+      )
+    }
+  )
+
+  it('shows operation context while work is pending without reporting completion', () => {
+    const task = {
+      ...tasks[2],
+      task_type: PaperlessTaskType.BulkUpdate,
+      task_type_display: 'Bulk Update',
+      input_data: { operation: 'reprocess', document_count: 1 },
+    }
+    component.setSection(TaskSection.InProgress)
+    flushTaskLists(25, 1, [task])
+    fixture.detectChanges()
+
+    const name = fixture.nativeElement.querySelector('tbody .name-col')
+    expect(name.textContent).toContain('Document reprocessing')
+    expect(name.textContent).not.toContain('Bulk operation:')
+    expect(name.querySelector('small')).toBeNull()
+    expect(component.taskResultMessage(task)).toBeNull()
+  })
+
+  it.each([{}, { operation: 'future_operation' }])(
+    'preserves the fallback for legacy or unknown operation data: %j',
+    (input_data) => {
+      const task = {
+        ...tasks[4],
+        task_type: PaperlessTaskType.BulkUpdate,
+        task_type_display: 'Bulk Update',
+        input_data,
+        result_data: {},
+      }
+      expect(component.taskDisplayName(task)).toBe('Bulk Update')
+      expect(component.taskDocumentCount(task)).toBeNull()
+      expect(component.taskResultMessage(task)).toBeNull()
+    }
+  )
+
+  it.each([-1, 1.5, '2', null, undefined])(
+    'does not display an invalid document count: %s',
+    (document_count) => {
+      expect(
+        component.taskDocumentCount({
+          ...tasks[4],
+          input_data: { operation: 'modify_tags', document_count },
+        })
+      ).toBeNull()
+    }
+  )
+
+  it('retains error details for failed operation tasks', () => {
+    expect(
+      component.taskResultMessage({
+        ...tasks[0],
+        input_data: { operation: 'modify_tags', document_count: 12 },
+        result_data: { error_message: 'Insufficient permissions' },
+      })
+    ).toBe('Insufficient permissions')
+  })
+
   it('should filter tasks by result', () => {
     component.setSection(TaskSection.NeedsAttention)
     component.filterTargetID = 1
@@ -762,11 +1017,59 @@ describe('TasksComponent', () => {
     input.nativeElement.value = 'duplicate'
     input.nativeElement.dispatchEvent(new Event('input'))
     jest.advanceTimersByTime(150)
+    flushTaskLists(25, undefined, [tasks[0], tasks[1]])
     fixture.detectChanges()
     expect(component.filterText).toEqual('duplicate')
     expect(component.tasksForSection(TaskSection.NeedsAttention)).toHaveLength(
       2
     )
+  })
+
+  it('should show server-matched names when the displayed source is translated', () => {
+    component.setSection(TaskSection.InProgress)
+    flushTaskLists(25)
+    component.filterText = 'email'
+    jest.advanceTimersByTime(150)
+
+    const request = httpTestingController.expectOne(
+      (req) =>
+        req.url === `${environment.apiBaseUrl}tasks/` &&
+        req.params.get('name') === 'email' &&
+        req.params.get('page_size') === '25'
+    )
+    const translatedTask = {
+      ...tasks[5],
+      trigger_source_display: 'E-Mail',
+    }
+    request.flush({ count: 1, results: [translatedTask] })
+    fixture.detectChanges()
+
+    expect(component.totalTasks()).toBe(1)
+    expect(component.visibleTasks).toEqual([translatedTask])
+  })
+
+  it('should show server-matched duplicates when the displayed result is translated', () => {
+    component.setSection(TaskSection.NeedsAttention)
+    flushTaskLists(25)
+    jest
+      .spyOn(component, 'taskResultMessage')
+      .mockReturnValue('Duplikat von Document #311')
+    component.setFilterTarget(TaskFilterTargetID.Result)
+    component.filterText = 'duplicate'
+    jest.advanceTimersByTime(150)
+
+    const request = httpTestingController.expectOne(
+      (req) =>
+        req.url === `${environment.apiBaseUrl}tasks/` &&
+        req.params.get('result') === 'duplicate' &&
+        req.params.get('page_size') === '25'
+    )
+    request.flush({ count: 1, results: [tasks[1]] })
+    fixture.detectChanges()
+
+    expect(component.totalTasks()).toBe(1)
+    expect(component.visibleTasks).toEqual([tasks[1]])
+    expect(fixture.nativeElement.textContent).toContain('191092.pdf')
   })
 
   it('should prefer explicit reason in the result message', () => {
