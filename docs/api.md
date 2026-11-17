@@ -162,6 +162,17 @@ including `gt` (>), `gte` (>=), `lt` (<), `lte` (<=), and `range`.
 Lastly, document link fields support a `contains` operator that behaves
 like a "is superset of" check.
 
+Date fields also accept relative expressions supported by
+[dateparser](https://dateparser.readthedocs.io/en/stable/), such as `today`,
+`in 30 days`, or `1 month ago`. For example, dates within the next 30 days:
+
+```json
+["expiry", "range", ["today", "in 30 days"]]
+```
+
+Expressions resolve each time the query runs, using `PAPERLESS_TIME_ZONE` and
+`PAPERLESS_DATE_PARSER_LANGUAGES` (automatic language detection when unset).
+
 ### `/api/search/autocomplete/`
 
 Get auto completions for a partial search term.
@@ -273,6 +284,12 @@ parameter above.
 The API supports various bulk-editing operations which are executed asynchronously.
 
 ### Documents
+
+Document bulk operations, including the dedicated document action endpoints, return
+`{"result":"OK","task_id":"…"}` when queued. Use `/api/tasks/?task_id={uuid}`
+to check the task outcome. Actions that create or reprocess files may start further
+consumption or reprocessing tasks and completion of the bulk task means those tasks
+were scheduled, not that their file processing has finished.
 
 For bulk operations on documents, use the endpoint `/api/documents/bulk_edit/` which accepts
 a json payload of the format:

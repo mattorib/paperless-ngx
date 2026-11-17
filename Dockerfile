@@ -30,7 +30,7 @@ RUN set -eux \
 # Purpose: Installs s6-overlay and rootfs
 # Comments:
 #  - Don't leave anything extra in here either
-FROM ghcr.io/astral-sh/uv:0.12.23-python3.14-trixie-slim AS s6-overlay-base
+FROM ghcr.io/astral-sh/uv:0.13.7-python3.14-trixie-slim@sha256:e80c05a310400cfc90af00b5b7271ef9ad24816e3265e1162af8a678e1aad099 AS s6-overlay-base
 
 WORKDIR /usr/src/s6
 
@@ -129,7 +129,6 @@ ARG RUNTIME_PACKAGES="\
   ghostscript \
   gnupg \
   icc-profiles-free \
-  imagemagick \
   # PostgreSQL
   postgresql-client \
   # MySQL / MariaDB
@@ -168,8 +167,6 @@ RUN set -eux \
         https://github.com/paperless-ngx/builder/releases/download/jbig2enc-trixie-v${JBIG2ENC_VERSION}/jbig2enc_${JBIG2ENC_VERSION}-1_${TARGETARCH}.deb \
       && echo "Installing jbig2enc" \
         && dpkg --install ./jbig2enc_${JBIG2ENC_VERSION}-1_${TARGETARCH}.deb \
-      && echo "Configuring imagemagick" \
-        && cp /etc/ImageMagick-6/paperless-policy.xml /etc/ImageMagick-6/policy.xml \
       && echo "Cleaning up image layer" \
         && rm --force --verbose *.deb \
     && rm --recursive --force --verbose /var/lib/apt/lists/* \

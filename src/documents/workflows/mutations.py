@@ -6,8 +6,10 @@ from guardian.shortcuts import remove_perm
 from documents.data_models import DocumentMetadataOverrides
 from documents.models import CustomFieldInstance
 from documents.models import Document
+from documents.models import Tag
 from documents.models import WorkflowAction
-from documents.permissions import set_permissions_for_object
+from documents.permissions import PermissionsSpec
+from documents.permissions import set_permissions_for_objects
 from documents.templating.workflows import parse_w_workflow_placeholders
 
 logger = logging.getLogger("paperless.workflows.mutations")
@@ -42,53 +44,6 @@ def apply_assignment_to_document(
     if action.assign_owner:
         document.owner = action.assign_owner
 
-    if action.assign_title:
-        try:
-            title = parse_w_workflow_placeholders(
-                action.assign_title,
-                document.correspondent.name if document.correspondent else "",
-                document.document_type.name if document.document_type else "",
-                document.owner.username if document.owner else "",
-                timezone.localtime(document.added),
-                document.original_filename or "",
-                document.filename or "",
-                document.created,
-                "",  # dont pass the title to avoid recursion
-                "",  # no urls in titles
-                document.pk,
-            )
-            if title:
-                document.title = title
-        except Exception:  # pragma: no cover
-            logger.exception(
-                f"Error occurred parsing title assignment '{action.assign_title}', falling back to original",
-                extra={"group": logging_group},
-            )
-
-    if any(
-        [
-            action.has_assign_view_users,
-            action.has_assign_view_groups,
-            action.has_assign_change_users,
-            action.has_assign_change_groups,
-        ],
-    ):
-        permissions = {
-            "view": {
-                "users": action.assign_view_users.values_list("id", flat=True),
-                "groups": action.assign_view_groups.values_list("id", flat=True),
-            },
-            "change": {
-                "users": action.assign_change_users.values_list("id", flat=True),
-                "groups": action.assign_change_groups.values_list("id", flat=True),
-            },
-        }
-        set_permissions_for_object(
-            permissions=permissions,
-            object=document,
-            merge=True,
-        )
-
     if action.has_assign_custom_fields:
         for field in action.assign_custom_fields.all():
             value_field_name = CustomFieldInstance.get_value_field_name(
@@ -116,6 +71,57 @@ def apply_assignment_to_document(
                     document=document,
                 )
 
+    if action.assign_title:
+        try:
+            title = parse_w_workflow_placeholders(
+                action.assign_title,
+                document.correspondent.name if document.correspondent else "",
+                document.document_type.name if document.document_type else "",
+                document.owner.username if document.owner else "",
+                timezone.localtime(document.added),
+                document.original_filename or "",
+                document.filename or "",
+                document.created,
+                "",  # dont pass the title to avoid recursion
+                "",  # no urls in titles
+                document.pk,
+                custom_fields=CustomFieldInstance.global_objects.filter(
+                    document=document,
+                ).select_related("field"),
+            )
+            if title:
+                document.title = title
+        except Exception:  # pragma: no cover
+            logger.exception(
+                f"Error occurred parsing title assignment '{action.assign_title}', falling back to original",
+                extra={"group": logging_group},
+            )
+
+    if any(
+        [
+            action.has_assign_view_users,
+            action.has_assign_view_groups,
+            action.has_assign_change_users,
+            action.has_assign_change_groups,
+        ],
+    ):
+        permissions: PermissionsSpec = {
+            "view": {
+                "users": action.assign_view_users.values_list("id", flat=True),
+                "groups": action.assign_view_groups.values_list("id", flat=True),
+            },
+            "change": {
+                "users": action.assign_change_users.values_list("id", flat=True),
+                "groups": action.assign_change_groups.values_list("id", flat=True),
+            },
+        }
+        set_permissions_for_objects(
+            permissions,
+            Document,
+            [document.pk],
+            merge=True,
+        )
+
 
 def apply_assignment_to_overrides(
     action: WorkflowAction,
@@ -129,10 +135,9 @@ def apply_assignment_to_overrides(
     if action.has_assign_tags:
         if overrides.tag_ids is None:
             overrides.tag_ids = []
-        tag_ids_to_add: set[int] = set()
-        for tag in action.assign_tags.all():
-            tag_ids_to_add.add(tag.pk)
-            tag_ids_to_add.update(int(pk) for pk in tag.get_ancestors_pks())
+        tag_ids_to_add = Tag.get_hierarchy().with_ancestors(
+            tag.pk for tag in action.assign_tags.all()
+        )
 
         overrides.tag_ids = list(set(overrides.tag_ids) | tag_ids_to_add)
 
@@ -211,10 +216,9 @@ def apply_removal_to_document(
     if action.remove_all_tags:
         Document.objects.get(pk=document.pk).tags.clear()
     else:
-        tag_ids_to_remove: set[int] = set()
-        for tag in action.remove_tags.all():
-            tag_ids_to_remove.add(tag.pk)
-            tag_ids_to_remove.update(int(pk) for pk in tag.get_descendants_pks())
+        tag_ids_to_remove = Tag.get_hierarchy().with_descendants(
+            tag.pk for tag in action.remove_tags.all()
+        )
 
         if tag_ids_to_remove:
             Document.objects.get(pk=document.pk).tags.remove(*tag_ids_to_remove)
@@ -243,13 +247,14 @@ def apply_removal_to_document(
         document.owner = None
 
     if action.remove_all_permissions:
-        permissions = {
+        permissions: PermissionsSpec = {
             "view": {"users": [], "groups": []},
             "change": {"users": [], "groups": []},
         }
-        set_permissions_for_object(
-            permissions=permissions,
-            object=document,
+        set_permissions_for_objects(
+            permissions,
+            Document,
+            [document.pk],
             merge=False,
         )
 
@@ -291,10 +296,9 @@ def apply_removal_to_overrides(
     if action.remove_all_tags:
         overrides.tag_ids = None
     elif overrides.tag_ids:
-        tag_ids_to_remove: set[int] = set()
-        for tag in action.remove_tags.all():
-            tag_ids_to_remove.add(tag.pk)
-            tag_ids_to_remove.update(int(pk) for pk in tag.get_descendants_pks())
+        tag_ids_to_remove = Tag.get_hierarchy().with_descendants(
+            tag.pk for tag in action.remove_tags.all()
+        )
 
         overrides.tag_ids = [t for t in overrides.tag_ids if t not in tag_ids_to_remove]
 

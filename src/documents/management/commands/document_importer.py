@@ -66,7 +66,7 @@ def iter_manifest_records(path: Path) -> Generator[dict, None, None]:
     """Yield records one at a time from a manifest JSON array via ijson."""
     try:
         with path.open("rb") as f:
-            yield from ijson.items(f, "item")
+            yield from ijson.items(f, "item", use_float=True)
     except ijson.JSONError as e:
         raise CommandError(f"Failed to parse manifest file {path}: {e}") from e
 
@@ -108,6 +108,24 @@ def _deserialize_record(
         ) from e
 
     for field_name, field_value in record.get("fields", {}).items():
+        # Older exports include django-treenode's derived bookkeeping. The
+        # parent FK is authoritative; accept only these known removed fields.
+        if Model is Tag and field_name in {
+            "tn_ancestors_count",
+            "tn_ancestors_pks",
+            "tn_children_count",
+            "tn_children_pks",
+            "tn_depth",
+            "tn_descendants_count",
+            "tn_descendants_pks",
+            "tn_index",
+            "tn_level",
+            "tn_order",
+            "tn_priority",
+            "tn_siblings_count",
+            "tn_siblings_pks",
+        }:
+            continue
         field = Model._meta.get_field(field_name)
         remote = field.remote_field
 
