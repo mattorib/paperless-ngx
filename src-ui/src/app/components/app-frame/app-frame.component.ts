@@ -6,7 +6,16 @@ import {
   moveItemInArray,
 } from '@angular/cdk/drag-drop'
 import { NgClass } from '@angular/common'
-import { Component, HostListener, inject, OnInit, signal } from '@angular/core'
+import {
+  Component,
+  DestroyRef,
+  HostListener,
+  inject,
+  OnInit,
+  signal,
+  viewChild,
+} from '@angular/core'
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop'
 import { FormsModule } from '@angular/forms'
 import { ActivatedRoute, Router, RouterModule } from '@angular/router'
 import {
@@ -16,11 +25,12 @@ import {
   NgbNavModule,
   NgbPopoverModule,
 } from '@ng-bootstrap/ng-bootstrap'
-import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
 import { TourNgBootstrap } from 'ngx-ui-tour-ng-bootstrap'
-import { Observable } from 'rxjs'
+import { filter, Observable } from 'rxjs'
 import { first } from 'rxjs/operators'
+import { BootstrapIconComponent } from 'src/app/components/common/bootstrap-icon/bootstrap-icon.component'
 import { Document } from 'src/app/data/document'
+import { PaperlessTaskStatus } from 'src/app/data/paperless-task'
 import { SavedView } from 'src/app/data/saved-view'
 import {
   CollapsibleSection,
@@ -34,6 +44,7 @@ import {
   DjangoMessageLevel,
   DjangoMessagesService,
 } from 'src/app/services/django-messages.service'
+import { DocumentListViewService } from 'src/app/services/document-list-view.service'
 import { OpenDocumentsService } from 'src/app/services/open-documents.service'
 import {
   PermissionAction,
@@ -46,14 +57,18 @@ import {
 } from 'src/app/services/rest/remote-version.service'
 import { SavedViewService } from 'src/app/services/rest/saved-view.service'
 import { SettingsService } from 'src/app/services/settings.service'
+import { TaskNotificationService } from 'src/app/services/task-notification.service'
 import { TasksService } from 'src/app/services/tasks.service'
 import { ToastService } from 'src/app/services/toast.service'
+import { UploadDocumentsService } from 'src/app/services/upload-documents.service'
+import { WebsocketStatusService } from 'src/app/services/websocket-status.service'
 import { environment } from 'src/environments/environment'
 import { ChatComponent } from '../chat/chat/chat.component'
+import { SwitchComponent } from '../common/input/switch/switch.component'
 import { BrandMarkComponent } from '../common/logo/brand-mark/brand-mark.component'
 import { LogoComponent } from '../common/logo/logo.component'
 import { ProfileEditDialogComponent } from '../common/profile-edit-dialog/profile-edit-dialog.component'
-import { SwitchComponent } from '../common/input/switch/switch.component'
+import { UploadStatusTrayComponent } from '../common/upload-status-tray/upload-status-tray.component'
 import { DocumentDetailComponent } from '../document-detail/document-detail.component'
 import { ComponentWithPermissions } from '../with-permissions/with-permissions.component'
 import { GlobalSearchComponent } from './global-search/global-search.component'
@@ -79,17 +94,20 @@ const SCROLL_THRESHOLD = 16
     NgbPopoverModule,
     NgbCollapseModule,
     NgbNavModule,
-    NgxBootstrapIconsModule,
+    BootstrapIconComponent,
     DragDropModule,
     TourNgBootstrap,
     FormsModule,
     SwitchComponent,
+    UploadStatusTrayComponent,
   ],
 })
 export class AppFrameComponent
   extends ComponentWithPermissions
   implements OnInit, ComponentCanDeactivate
 {
+  private destroyRef = inject(DestroyRef)
+  private documentList = inject(DocumentListViewService)
   router = inject(Router)
   private activatedRoute = inject(ActivatedRoute)
   private openDocumentsService = inject(OpenDocumentsService)
@@ -98,9 +116,14 @@ export class AppFrameComponent
   settingsService = inject(SettingsService)
   tasksService = inject(TasksService)
   private readonly toastService = inject(ToastService)
+  private readonly taskNotifications = inject(TaskNotificationService)
   private modalService = inject(NgbModal)
   permissionsService = inject(PermissionsService)
   private djangoMessagesService = inject(DjangoMessagesService)
+  private uploadDocumentsService = inject(UploadDocumentsService)
+  private websocketStatusService = inject(WebsocketStatusService)
+
+  private readonly uploadStatusTray = viewChild(UploadStatusTrayComponent)
 
   readonly appRemoteVersion = signal<AppRemoteVersion>(null)
   readonly isMenuCollapsed = signal(true)
@@ -149,6 +172,39 @@ export class AppFrameComponent
   }
 
   ngOnInit(): void {
+    this.websocketStatusService
+      .onBulkOperationStatus()
+      .pipe(
+        filter(({ status }) =>
+          [
+            PaperlessTaskStatus.Success,
+            PaperlessTaskStatus.Failure,
+            PaperlessTaskStatus.Revoked,
+          ].includes(status)
+        ),
+        takeUntilDestroyed(this.destroyRef)
+      )
+      .subscribe((result) => {
+        this.documentList.reload(null, false)
+        if (!this.documentList.allSelected) {
+          this.documentList.reduceSelectionToFilter()
+        }
+        // maybe someday we can optimize to only refresh affected documents
+        this.openDocumentsService.getOpenDocuments().forEach((doc) => {
+          this.openDocumentsService.refreshDocument(doc.id)
+        })
+        this.savedViewService.maybeRefreshDocumentCounts()
+        if (
+          this.permissionsService.currentUserCan(
+            PermissionAction.View,
+            PermissionType.PaperlessTask
+          )
+        ) {
+          this.tasksService.reload()
+        }
+        this.taskNotifications.complete(result)
+      })
+
     this.lastScrollY = window.scrollY
     this.detectClassicScrollbars()
 
@@ -171,6 +227,8 @@ export class AppFrameComponent
           this.toastService.showError(message.message)
           break
         case DjangoMessageLevel.SUCCESS:
+          this.toastService.showSuccess(message.message)
+          break
         case DjangoMessageLevel.INFO:
         case DjangoMessageLevel.DEBUG:
           this.toastService.showInfo(message.message)
@@ -477,7 +535,7 @@ export class AppFrameComponent
 
     this.settingsService.updateSidebarViewsSort(sidebarViews).subscribe({
       next: () => {
-        this.toastService.showInfo($localize`Sidebar views updated`)
+        this.toastService.showSuccess($localize`Sidebar views updated`)
       },
       error: (e) => {
         this.toastService.showError($localize`Error updating sidebar views`, e)
@@ -509,6 +567,22 @@ export class AppFrameComponent
     if (enable) {
       this.checkForUpdates()
     }
+  }
+
+  onFileSelected(event: Event) {
+    const input = event.target as HTMLInputElement
+    const files = Array.from(input.files ?? [])
+    input.value = ''
+    if (!files.length) return
+    this.uploadDocumentsService.uploadFiles(files)
+  }
+
+  get uploadsInProgress(): number {
+    return this.websocketStatusService.getConsumerStatusNotCompleted().length
+  }
+
+  showUploadStatus() {
+    this.uploadStatusTray()?.expand()
   }
 
   onLogout() {

@@ -2,27 +2,17 @@ from django.utils.translation import gettext as _
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
-from documents.permissions import get_objects_for_user_owner_aware
 from documents.permissions import has_perms_owner_aware
+from documents.permissions import restrict_queryset_to_visible
 from documents.serialisers import CorrespondentField
 from documents.serialisers import DocumentTypeField
 from documents.serialisers import OwnedObjectSerializer
 from documents.serialisers import TagsField
+from paperless.fields import ObfuscatedPasswordField
+from paperless.fields import is_obfuscated_password
 from paperless_mail.models import MailAccount
 from paperless_mail.models import MailRule
 from paperless_mail.models import ProcessedMail
-
-
-class ObfuscatedPasswordField(serializers.CharField):
-    """
-    Sends *** string instead of password in the clear
-    """
-
-    def to_representation(self, value) -> str:
-        return "*" * max(10, len(value))
-
-    def to_internal_value(self, data):
-        return data
 
 
 class MailAccountSerializer(OwnedObjectSerializer):
@@ -50,9 +40,8 @@ class MailAccountSerializer(OwnedObjectSerializer):
         ]
 
     def update(self, instance, validated_data):
-        if (
-            "password" in validated_data
-            and len(validated_data.get("password").replace("*", "")) == 0
+        if "password" in validated_data and is_obfuscated_password(
+            validated_data["password"],
         ):
             validated_data.pop("password")
         super().update(instance, validated_data)
@@ -68,10 +57,10 @@ class AccountField(serializers.PrimaryKeyRelatedField[MailAccount]):
         if user is None:
             return MailAccount.objects.none()
 
-        return get_objects_for_user_owner_aware(
+        return restrict_queryset_to_visible(
+            MailAccount.objects.all(),
             user,
             "change_mailaccount",
-            MailAccount,
         ).order_by("-id")
 
 
