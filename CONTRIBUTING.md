@@ -4,6 +4,18 @@ If you feel like contributing to the project, please do! Bug fixes and improveme
 
 ⚠️ Please note: Pull requests that implement a new feature or enhancement _should almost always target an existing feature request_ with evidence of community interest and discussion. This is in order to balance the work of implementing and maintaining new features / enhancements. Pull requests that are opened without meeting this requirement may not be merged.
 
+## Trust and collaboration
+
+Paperless-ngx places a high value on trust between contributors and maintainers. If you have not contributed before, consider starting with a discussion before preparing a pull request, especially for a large contribution or one involving AI-generated code.
+
+Paperless-ngx is complex, and understanding how its components interact takes time. A change that appears correct in isolation can have consequences elsewhere in the application. Contributors should understand the code they submit, explain how it fits into the project, and work with maintainers through review. Starting with smaller, focused contributions can help build that understanding and trust.
+
+We prefer thoughtful, well-described ideas to AI-generated pull requests. You do not need to supply an implementation for your contribution to be valuable. Explain the problem you have encountered, your use case, the behavior you would like to see, and who would benefit. Concrete examples, alternatives you have considered, and relevant constraints help the community discuss and refine the idea.
+
+AI tools have lowered the effort needed to produce a pull request, but evaluating one still requires substantial maintainer time. Maintainers still need to establish whether the implementation is correct, fits the project, and can be maintained over time.
+
+A flawed implementation can also obscure a good idea: discussion becomes focused on problems with the generated code before the community has considered whether the underlying proposal is useful. Starting with the idea gives it a fair discussion on its own merits and lets contributors and maintainers agree on an approach before investing in implementation and review.
+
 If you want to implement something big:
 
 - As above, please start with a discussion! Maybe something similar is already in development and we can make it happen together.
@@ -43,26 +55,17 @@ Once you have submitted a **P**ull **R**equest it will be reviewed, approved, an
 
 Important: Pull requests that implement a new feature or enhancement _should almost always target an existing feature request_ with evidence of community interest and discussion. This is in order to balance the work of implementing and maintaining new features / enhancements. Instead of opening a PR which does not meet this requirement, please open a feature request instead, to gather feedback from both users and the project maintainers.
 
-## Non-Trivial Requests
+## PR Review Process
 
-PRs deemed `non-trivial` will go through a stricter review process before being merged into `dev`. This is to ensure code quality and complete functionality (free of side effects).
-
-Examples of `non-trivial` PRs might include:
-
-- Additional features
-- Large changes to many distinct files
-- Breaking or deprecation of existing features
-
-Our community review process for `non-trivial` PRs is the following:
+Our community review process for PRs is the following:
 
 1. Must pass usual automated code tests and formatting checks.
 2. The PR will be assigned and pinged to the appropriately experienced team (i.e. @paperless-ngx/backend for backend changes).
 3. Development team will check and test code manually (possibly over several days).
    - You may be asked to make changes or rebase.
-   - The team may ask for additional testing done by @paperless-ngx/test
-4. **At least two** members of the team will approve and finally merge the request into `dev` 🎉.
+4. One or more members of the team will approve and finally merge the request into `dev` 🎉.
 
-This process might be slow as community members have different schedules and time to dedicate to the Paperless project. However it ensures community code reviews are as brilliantly thorough as they once were with @jonaswinkler.
+This process might be slow as community members have different schedules and time to dedicate to the Paperless project. However it ensures community code reviews are thorough and of high quality.
 
 # Use of AI Tools
 
@@ -70,9 +73,10 @@ This project does not specifically prohibit the use of AI tools or agents _durin
 
 1. Any content — code, pull request descriptions, issue reports or comments — that was generated in whole or in part by an AI tool or agent **must be clearly disclosed as such**. Failing to clearly disclose this is considered a violation of our [Code of Conduct](CODE_OF_CONDUCT.md) and may result in your contributions being closed and further action being taken.
 2. AI-generated code must not violate copyright protections.
-3. We will not accept PRs that are entirely or mostly AI-derived.
-4. Issue reports must describe _observed behavior only_: what happened, how to reproduce it and the relevant logs. Reports generated by an AI agent should not include code analysis, speculation about the root cause or suggest fixes.
-5. Contributors are responsible for everything they submit, regardless of how it was produced. Please do not open issues or PRs you have not verified yourself.
+3. We will not accept PRs opened or submitted by AI agents, including agents acting "on behalf of" a human. A human contributor must personally review, verify, and submit the contribution and take responsibility for it throughout review.
+4. We will not accept PRs that are entirely or mostly AI-derived.
+5. Issue reports must describe _observed behavior only_: what happened, how to reproduce it and the relevant logs. Reports generated by an AI agent should not include code analysis, speculation about the root cause or suggest fixes.
+6. Contributors are responsible for everything they submit, regardless of how it was produced. Please do not open issues or PRs you have not verified yourself.
 
 # Translating Paperless-ngx
 

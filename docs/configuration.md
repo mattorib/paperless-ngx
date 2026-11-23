@@ -370,6 +370,15 @@ instead of being removed from the filesystem. Only the original version is kept.
 
     This setting was previously named PAPERLESS_TRASH_DIR.
 
+#### [`PAPERLESS_SCRATCH_DIR=<path>`](#PAPERLESS_SCRATCH_DIR) {#PAPERLESS_SCRATCH_DIR}
+
+: This folder is used as a temporary workspace for multiple paperless operations, including
+consuming documents, editing, and the document exporter.
+
+    This must be writeable by the user running paperless.
+
+    Defaults to "/tmp/paperless".
+
 #### [`PAPERLESS_MEDIA_ROOT=<path>`](#PAPERLESS_MEDIA_ROOT) {#PAPERLESS_MEDIA_ROOT}
 
 : This is where your documents and thumbnails are stored.
@@ -492,20 +501,20 @@ See the [Django project documentation on the settings](https://docs.djangoprojec
 
 #### [`PAPERLESS_ALLOWED_HOSTS=<comma-separated-list>`](#PAPERLESS_ALLOWED_HOSTS) {#PAPERLESS_ALLOWED_HOSTS}
 
-: If you're planning on putting Paperless on the open internet, then
-you really should set this value to the domain name you're using.
-Failing to do so leaves you open to HTTP host header attacks.
+: If you expose Paperless to the internet, set `PAPERLESS_URL` to its public URL
+or list its public hostname in `PAPERLESS_ALLOWED_HOSTS` to help protect against
+HTTP Host header attacks.
 You can read more about this in [the Django project's documentation](https://docs.djangoproject.com/en/4.1/topics/security/#host-header-validation)
 
-    Just remember that this is a comma-separated list, so
-    "example.com" is fine, as is "example.com,www.example.com", but
-    NOT " example.com" or "example.com,"
+    Separate multiple hostnames with commas, as in `example.com,www.example.com`.
 
-    Can also be set using PAPERLESS_URL (see above).
-
-    "localhost" is always allowed for docker healthcheck
-
-    Defaults to "\*", which is all hosts.
+    - With neither setting configured, Paperless accepts any host.
+    - With only `PAPERLESS_URL` set, Paperless accepts the hostname from that URL
+      and `localhost` (used by the Docker health check).
+    - `PAPERLESS_ALLOWED_HOSTS` adds hosts to `localhost` and the hostname from
+      `PAPERLESS_URL`, if set. A blank list adds no hosts.
+    - With `PAPERLESS_ALLOWED_HOSTS=*`, Paperless accepts any host, even when
+      `PAPERLESS_URL` is set.
 
 #### [`PAPERLESS_CORS_ALLOWED_HOSTS=<comma-separated-list>`](#PAPERLESS_CORS_ALLOWED_HOSTS) {#PAPERLESS_CORS_ALLOWED_HOSTS}
 
@@ -794,6 +803,17 @@ system. See the corresponding
 
     Defaults to None
 
+#### [`PAPERLESS_SOCIAL_ACCOUNT_MFA_TRUSTED_AMR=<comma-separated-list>`](#PAPERLESS_SOCIAL_ACCOUNT_MFA_TRUSTED_AMR) {#PAPERLESS_SOCIAL_ACCOUNT_MFA_TRUSTED_AMR}
+
+: A list of authentication method values which, if present in the `amr` claim of the ID token sent by an OpenID Connect provider, cause Paperless-ngx to skip its own two-factor authentication prompt for that login. This avoids users having to enter a second factor twice when the identity provider already performed multi-factor authentication. Logins with a username and password, or via a provider which does not send a matching `amr` value, still require the Paperless-ngx code.
+
+    Which values to trust depends entirely on your identity provider, e.g. Authelia sends `mfa` and Pocket ID sends `phr` for passkey logins (but `otp` for single-factor email codes, which should _not_ be trusted). Some providers, such as Keycloak, do not send an `amr` claim by default and need to be configured to do so. You can see what your provider sends from the Django admin as a superuser by checking `id_token` → `amr` in the "Extra data" of the social account.
+
+    !!! warning
+        Only list values that mean a second factor was actually used for the login.
+
+    Defaults to `mfa`, the standard value for multi-factor authentication ([RFC 8176](https://www.rfc-editor.org/rfc/rfc8176.html)).
+
 #### [`PAPERLESS_SOCIAL_ACCOUNT_DEFAULT_GROUPS=<comma-separated-list>`](#PAPERLESS_SOCIAL_ACCOUNT_DEFAULT_GROUPS) {#PAPERLESS_SOCIAL_ACCOUNT_DEFAULT_GROUPS}
 
 : A list of group names that users who signup via social accounts will be added to upon signup. Groups listed here must already exist.
@@ -852,6 +872,14 @@ If both the [PAPERLESS_ACCOUNT_DEFAULT_GROUPS](#PAPERLESS_ACCOUNT_DEFAULT_GROUPS
 [django documentation](https://docs.djangoproject.com/en/5.1/ref/settings/#std-setting-SESSION_COOKIE_AGE)
 
     Defaults to 1209600 (2 weeks)
+
+#### [`PAPERLESS_SESSION_CLEANUP_TASK_CRON=<cron expression>`](#PAPERLESS_SESSION_CLEANUP_TASK_CRON) {#PAPERLESS_SESSION_CLEANUP_TASK_CRON}
+
+: Configures the schedule to remove expired sessions from the session store.
+Django does not prune these automatically, so without this they would
+accumulate indefinitely.
+
+    Defaults to `0 3 * * *`, once per day at 03:00.
 
 #### [`PAPERLESS_TOKEN_THROTTLE_RATE=<rate>`](#PAPERLESS_TOKEN_THROTTLE_RATE) {#PAPERLESS_TOKEN_THROTTLE_RATE}
 
@@ -1129,6 +1157,9 @@ they use underscores instead of dashes.
         be changed by trusted users. This applies to the `AppConfig` permission as well,
         which allows setting these arguments from the UI.
 
+        Arguments paperless manages itself (`input_file_or_options`, `output_file`
+        and `sidecar`) are rejected by the API and ignored if set here.
+
     Specify arguments as a JSON dictionary. Keep note of lower case
     booleans and double quoted parameter names and strings. Examples:
 
@@ -1315,29 +1346,17 @@ valid crontab(5) expression describing when to run.
 
 #### [`PAPERLESS_CONVERT_MEMORY_LIMIT=<num>`](#PAPERLESS_CONVERT_MEMORY_LIMIT) {#PAPERLESS_CONVERT_MEMORY_LIMIT}
 
-: On smaller systems, or even in the case of Very Large Documents, the
-consumer may explode, complaining about how it's "unable to extend
-pixel cache". In such cases, try setting this to a reasonably low
-value, like 32. The default is to use whatever is necessary to do
-everything without writing to disk, and units are in megabytes.
+!!! warning
 
-    For more information on how to use this value, you should search the
-    web for "MAGICK_MEMORY_LIMIT".
-
-    Defaults to 0, which disables the limit.
+    Deprecated and has no effect, since PDF thumbnails no longer use
+    ImageMagick. It will be removed in a future release.
 
 #### [`PAPERLESS_CONVERT_TMPDIR=<path>`](#PAPERLESS_CONVERT_TMPDIR) {#PAPERLESS_CONVERT_TMPDIR}
 
-: Similar to the memory limit, if you've got a small system and your
-OS mounts /tmp as tmpfs, you should set this to a path that's on a
-physical disk, like /home/your_user/tmp or something. ImageMagick
-will use this as scratch space when crunching through very large
-documents.
+!!! warning
 
-    For more information on how to use this value, you should search the
-    web for "MAGICK_TMPDIR".
-
-    Default is none, which disables the temporary directory.
+    Deprecated and has no effect, since PDF thumbnails no longer use
+    ImageMagick. It will be removed in a future release.
 
 #### [`PAPERLESS_APPS=<string>`](#PAPERLESS_APPS) {#PAPERLESS_APPS}
 
@@ -1885,11 +1904,17 @@ the literal path for that program.
 
 #### [`PAPERLESS_CONVERT_BINARY=<path>`](#PAPERLESS_CONVERT_BINARY) {#PAPERLESS_CONVERT_BINARY}
 
-: Defaults to "convert".
+!!! warning
+
+    Deprecated and has no effect, since Paperless-ngx no longer uses
+    ImageMagick. It will be removed in a future release.
 
 #### [`PAPERLESS_GS_BINARY=<path>`](#PAPERLESS_GS_BINARY) {#PAPERLESS_GS_BINARY}
 
-: Defaults to "gs".
+!!! warning
+
+    Deprecated and has no effect, since nothing in Paperless-ngx calls
+    Ghostscript by this path. It will be removed in a future release.
 
 ## Docker-specific options {#docker}
 

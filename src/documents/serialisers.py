@@ -8,7 +8,6 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 from typing import Any
-from typing import Literal
 from typing import TypedDict
 
 import magic
@@ -39,7 +38,6 @@ from drf_spectacular.utils import extend_schema_field
 from drf_spectacular.utils import extend_schema_serializer
 from drf_writable_nested.serializers import NestedUpdateMixin
 from guardian.core import ObjectPermissionChecker
-from guardian.shortcuts import get_users_with_perms
 from guardian.utils import get_group_obj_perms_model
 from guardian.utils import get_user_obj_perms_model
 from rest_framework import fields
@@ -78,12 +76,17 @@ from documents.models import WorkflowActionEmail
 from documents.models import WorkflowActionWebhook
 from documents.models import WorkflowTrigger
 from documents.parsers import is_mime_type_supported
+from documents.permissions import PERMISSION_ACTIONS
+from documents.permissions import PermissionAction
+from documents.permissions import PermissionGrantees
+from documents.permissions import PermissionGranteesUpdate
+from documents.permissions import PermissionsSpec
 from documents.permissions import get_document_count_filter_for_user
-from documents.permissions import get_groups_with_only_permission
+from documents.permissions import get_permission_grantees
 from documents.permissions import has_perms_owner_aware
 from documents.permissions import permitted_document_ids
 from documents.permissions import restrict_queryset_to_visible
-from documents.permissions import set_permissions_for_object
+from documents.permissions import set_permissions_for_objects
 from documents.regex import validate_regex_pattern
 from documents.templating.filepath import validate_filepath_template_and_render
 from documents.templating.utils import convert_format_str_to_template_format
@@ -211,9 +214,6 @@ class MatchingModelSerializer(serializers.ModelSerializer[Any]):
         return match
 
 
-PERMISSION_ACTIONS = ("view", "change")
-
-
 class SetPermissionsMixin:
     def _validate_user_ids(self, user_ids):
         users = User.objects.none()
@@ -235,8 +235,10 @@ class SetPermissionsMixin:
                 )
         return groups
 
-    def validate_set_permissions(self, set_permissions=None):
-        permissions_dict = {action: {} for action in PERMISSION_ACTIONS}
+    def validate_set_permissions(self, set_permissions=None) -> PermissionsSpec:
+        permissions_dict: dict[PermissionAction, PermissionGranteesUpdate] = {
+            action: {} for action in PERMISSION_ACTIONS
+        }
         if set_permissions is not None:
             for action in PERMISSION_ACTIONS:
                 if action in set_permissions:
@@ -244,18 +246,18 @@ class SetPermissionsMixin:
                         users = set_permissions[action]["users"]
                         permissions_dict[action]["users"] = self._validate_user_ids(
                             users,
-                        )
+                        ).values_list("id", flat=True)
                     if "groups" in set_permissions[action]:
                         groups = set_permissions[action]["groups"]
                         permissions_dict[action]["groups"] = self._validate_group_ids(
                             groups,
-                        )
+                        ).values_list("id", flat=True)
                 else:
                     del permissions_dict[action]
         return permissions_dict
 
-    def _set_permissions(self, permissions, object) -> None:
-        set_permissions_for_object(permissions, object)
+    def _set_permissions(self, permissions: PermissionsSpec, object) -> None:
+        set_permissions_for_objects(permissions, type(object), [object.pk])
 
 
 class SerializerWithPerms(serializers.Serializer[dict[str, Any]]):
@@ -311,35 +313,6 @@ class OwnedObjectSerializer(
             except KeyError:
                 pass
 
-    def _get_perms(self, obj, codename: str, target: Literal["users", "groups"]):
-        """
-        Get the given permissions from context or from django-guardian.
-
-        :param codename: The permission codename, e.g. 'view' or 'change'
-        :param target: 'users' or 'groups'
-        """
-        key = f"{target}_{codename}_perms"
-        cached = self.context.get(key, {}).get(obj.pk)
-        if cached is not None:
-            return list(cached)
-
-        # Permission not found in the context, get it from guardian
-        if target == "users":
-            return list(
-                get_users_with_perms(
-                    obj,
-                    only_with_perms_in=[f"{codename}_{obj.__class__.__name__.lower()}"],
-                    with_group_users=False,
-                ).values_list("id", flat=True),
-            )
-        else:  # groups
-            return list(
-                get_groups_with_only_permission(
-                    obj,
-                    codename=f"{codename}_{obj.__class__.__name__.lower()}",
-                ).values_list("id", flat=True),
-            )
-
     @extend_schema_field(
         field={
             "type": "object",
@@ -373,17 +346,12 @@ class OwnedObjectSerializer(
             },
         },
     )
-    def get_permissions(self, obj) -> dict:
-        return {
-            "view": {
-                "users": self._get_perms(obj, "view", "users"),
-                "groups": self._get_perms(obj, "view", "groups"),
-            },
-            "change": {
-                "users": self._get_perms(obj, "change", "users"),
-                "groups": self._get_perms(obj, "change", "groups"),
-            },
-        }
+    def get_permissions(self, obj) -> dict[PermissionAction, PermissionGrantees]:
+        # Prefer the page-level batch computed by BulkPermissionMixin.
+        grantees = self.context.get("permission_grantees", {}).get(obj.pk)
+        if grantees is not None:
+            return grantees
+        return get_permission_grantees(type(obj), [obj.pk])[obj.pk]
 
     def get_user_can_change(self, obj) -> bool:
         if obj.owner is None or obj.owner == self.user:
@@ -399,18 +367,18 @@ class OwnedObjectSerializer(
         # Prefer the page-level batch computed by BulkPermissionMixin
         # (get_serializer_context) over a fresh per-object guardian check,
         # which would otherwise query the permission tables once per row.
-        users_change_perms = self.context.get("users_change_perms")
-        groups_change_perms = self.context.get("groups_change_perms")
-        if users_change_perms is not None and groups_change_perms is not None:
-            if self.user.pk in users_change_perms.get(obj.pk, []):
+        grantees_by_pk = self.context.get("permission_grantees")
+        if grantees_by_pk is not None:
+            change = grantees_by_pk.get(obj.pk, {}).get("change")
+            if change is None:
+                return False
+            if self.user.pk in change["users"]:
                 return True
             user_group_ids = getattr(self, "_user_group_ids", None)
             if user_group_ids is None:
                 user_group_ids = set(self.user.groups.values_list("id", flat=True))
                 self._user_group_ids = user_group_ids
-            return bool(
-                user_group_ids.intersection(groups_change_perms.get(obj.pk, [])),
-            )
+            return bool(user_group_ids.intersection(change["groups"]))
 
         checker = ObjectPermissionChecker(self.user)
         return checker.has_perm(f"change_{obj.__class__.__name__.lower()}", obj)
@@ -621,7 +589,7 @@ class TagSerializer(MatchingModelSerializer, OwnedObjectSerializer):
 
     text_color = serializers.SerializerMethodField()
 
-    # map to treenode's tn_parent
+    # Preserve the public API parent field.
     parent = serializers.PrimaryKeyRelatedField(
         queryset=Tag.objects.all(),
         allow_null=True,
@@ -724,7 +692,9 @@ class TagSerializer(MatchingModelSerializer, OwnedObjectSerializer):
                 self.instance.clean()
             except ValidationError as e:
                 logger.debug("Tag parent validation failed: %s", e)
-                raise e
+                raise serializers.ValidationError(
+                    {"parent": e.message_dict["tn_parent"]},
+                ) from e
             finally:
                 self.instance.tn_parent = original_parent
         else:
@@ -734,7 +704,9 @@ class TagSerializer(MatchingModelSerializer, OwnedObjectSerializer):
                 temp.clean()
             except ValidationError as e:
                 logger.debug("Tag parent validation failed: %s", e)
-                raise e
+                raise serializers.ValidationError(
+                    {"parent": e.message_dict["tn_parent"]},
+                ) from e
 
         return super().validate(attrs)
 
@@ -999,8 +971,17 @@ class NotesSerializer(serializers.ModelSerializer[Note]):
 
     class Meta:
         model = Note
-        fields = ["id", "note", "created", "user"]
+        fields = ["id", "note", "format", "created", "user"]
         ordering = ["-created"]
+
+
+class NoteCreateSerializer(serializers.Serializer[dict[str, Any]]):
+    note = serializers.CharField()
+    format = serializers.ChoiceField(
+        choices=Note.Format.choices,
+        default=Note.Format.PLAIN,
+        required=False,
+    )
 
 
 def _get_viewable_duplicates(
@@ -1230,61 +1211,35 @@ class DocumentSerializer(
                             doc_id,
                         )
         if "tags" in validated_data:
-            # Respect tag hierarchy on updates:
-            # - Adding a child adds its ancestors
-            # - Removing a parent removes all its descendants
-            prev_tags = set(instance.tags.all())
-            requested_tags = set(validated_data["tags"])
+            hierarchy = Tag.get_hierarchy()
+            previous_ids = set(instance.tags.values_list("pk", flat=True))
+            requested_ids = {tag.pk for tag in validated_data["tags"]}
+            required_ids = hierarchy.with_ancestors(requested_ids - previous_ids)
+            blocked_ids = hierarchy.with_descendants(previous_ids - requested_ids)
+            blocked_ids.difference_update(required_ids)
+            final_ids = hierarchy.with_ancestors(requested_ids) - blocked_ids
+            validated_data["tags"] = list(Tag.objects.filter(pk__in=final_ids))
 
-            # Tags newly added in this update and the ancestors they require
-            added_tags = requested_tags - prev_tags
-            required_by_add_tags = set(added_tags)
-            for t in added_tags:
-                required_by_add_tags.update(t.get_ancestors())
-
-            # Tags being removed in this update and all descendants, except
-            # those required by a tag that is being added in this same update
-            removed_tags = prev_tags - requested_tags
-            blocked_tags = set(removed_tags)
-            for t in removed_tags:
-                blocked_tags.update(t.get_descendants())
-            blocked_tags.difference_update(required_by_add_tags)
-
-            # Add all parent tags
-            final_tags = set(requested_tags)
-            for t in requested_tags:
-                final_tags.update(t.get_ancestors())
-
-            # Drop removed parents and their descendants
-            final_tags.difference_update(blocked_tags)
-
-            validated_data["tags"] = list(final_tags)
         if validated_data.get("remove_inbox_tags"):
-            current_tag_ids = {t.pk for t in instance.tags.all()}
+            hierarchy = Tag.get_hierarchy()
             tags = (
                 validated_data["tags"]
                 if "tags" in validated_data
                 else list(instance.tags.all())
             )
-
-            # Tags newly added in this update, plus their ancestors, are kept
-            keep_ids: set[int] = set()
-            for tag in tags:
-                if tag.pk not in current_tag_ids:
-                    keep_ids.add(tag.pk)
-                    keep_ids.update(int(pk) for pk in tag.get_ancestors_pks())
-
-            # Remove inbox tags and their descendants, except those being kept
-            remove_ids: set[int] = set()
-            for inbox_tag in (
+            current_ids = set(instance.tags.values_list("pk", flat=True))
+            keep_ids = hierarchy.with_ancestors(
+                tag.pk for tag in tags if tag.pk not in current_ids
+            )
+            inbox_ids = (
                 Tag.objects.filter(is_inbox_tag=True)
-                .exclude(pk__in=keep_ids)
-                .only("pk", "tn_descendants_pks")
-            ):
-                remove_ids.add(inbox_tag.pk)
-                remove_ids.update(int(pk) for pk in inbox_tag.get_descendants_pks())
-
-            validated_data["tags"] = [t for t in tags if t.pk not in remove_ids]
+                .exclude(
+                    pk__in=keep_ids,
+                )
+                .values_list("pk", flat=True)
+            )
+            remove_ids = hierarchy.with_descendants(inbox_ids) - keep_ids
+            validated_data["tags"] = [tag for tag in tags if tag.pk not in remove_ids]
 
         if settings.AUDIT_LOG_ENABLED:
             with set_actor(self.user):
@@ -1733,6 +1688,7 @@ class MergeDocumentsSerializer(DocumentListSerializer, SourceModeValidationMixin
 
 class MergeDocumentsAsVersionsSerializer(DocumentListSerializer):
     root_document_id = serializers.IntegerField(required=True)
+    from_webui = serializers.BooleanField(required=False, default=False)
     version_label = serializers.CharField(
         required=False,
         allow_blank=True,
@@ -1761,19 +1717,17 @@ class MergeDocumentsAsVersionsSerializer(DocumentListSerializer):
                 "root_document_id must be one of the selected documents.",
             )
 
-        selected_documents = Document.objects.filter(id__in=documents)
-        if selected_documents.filter(root_document__isnull=False).exists():
-            raise serializers.ValidationError(
-                "Only top-level documents can be merged as versions.",
+        # Rechecked under row locks during execution in case document state changes.
+        selected_documents = list(
+            Document.objects.filter(id__in=documents).only("id", "root_document"),
+        )
+        try:
+            bulk_edit.validate_merge_as_versions_state(
+                selected_documents,
+                attrs["root_document_id"],
             )
-
-        source_document_ids = set(documents) - {attrs["root_document_id"]}
-        if Document.global_objects.filter(
-            root_document_id__in=source_document_ids,
-        ).exists():
-            raise serializers.ValidationError(
-                "Documents with existing versions cannot be merged into another document.",
-            )
+        except ValueError as error:
+            raise serializers.ValidationError(str(error)) from error
         return attrs
 
 
@@ -1846,11 +1800,12 @@ class RemovePasswordDocumentsSerializer(
 
 
 class DeleteDocumentsSerializer(DocumentSelectionSerializer):
-    pass
+    from_webui = serializers.BooleanField(required=False, default=False)
 
 
 class ReprocessDocumentsSerializer(DocumentSelectionSerializer):
     remote_ocr = serializers.BooleanField(required=False, default=False)
+    from_webui = serializers.BooleanField(required=False, default=False)
 
 
 class BulkEditSerializer(
@@ -1883,6 +1838,7 @@ class BulkEditSerializer(
             "modify_tags",
             "modify_custom_fields",
             "set_permissions",
+            "run_workflow",
             *LEGACY_DOCUMENT_ACTION_METHODS,
         ],
         label="Method",
@@ -1972,6 +1928,8 @@ class BulkEditSerializer(
             return bulk_edit.reprocess
         elif method == "set_permissions":
             return bulk_edit.set_permissions
+        elif method == "run_workflow":
+            return bulk_edit.run_workflow
         elif method == "rotate":
             return bulk_edit.rotate
         elif method == "merge":
@@ -2144,6 +2102,8 @@ class BulkEditSerializer(
             raise serializers.ValidationError("pages must be a list")
         if not all(isinstance(i, int) for i in parameters["pages"]):
             raise serializers.ValidationError("pages must be a list of integers")
+        if any(i < 1 for i in parameters["pages"]):
+            raise serializers.ValidationError("pages must be positive integers")
 
     def _validate_parameters_merge(self, parameters) -> None:
         if "delete_originals" in parameters:
@@ -2208,6 +2168,35 @@ class BulkEditSerializer(
                 raise serializers.ValidationError("remote_ocr must be a boolean")
         else:
             parameters["remote_ocr"] = False
+
+    def _validate_parameters_run_workflow(self, parameters) -> None:
+        if "workflow" not in parameters:
+            raise serializers.ValidationError("workflow not specified")
+        try:
+            workflow = Workflow.objects.get(id=parameters["workflow"])
+        except (Workflow.DoesNotExist, ValueError, TypeError):
+            raise serializers.ValidationError("Workflow does not exist")
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if user is not None and not user.has_perm("documents.view_workflow"):
+            raise PermissionDenied(
+                "Insufficient permissions to run this workflow",
+            )
+        if not workflow.enabled:
+            raise serializers.ValidationError("Workflow is not enabled")
+        if not workflow.triggers.filter(
+            type=WorkflowTrigger.WorkflowTriggerType.MANUAL,
+        ).exists():
+            raise serializers.ValidationError(
+                "Workflow does not have a manual trigger",
+            )
+        if "filter_documents" in parameters:
+            if not isinstance(parameters["filter_documents"], bool):
+                raise serializers.ValidationError(
+                    "filter_documents must be a boolean",
+                )
+        else:
+            parameters["filter_documents"] = True
 
     def validate_parameters_remove_password(self, parameters):
         if "password" not in parameters:
@@ -2275,6 +2264,8 @@ class BulkEditSerializer(
             self.validate_parameters_remove_password(parameters)
         elif method == bulk_edit.reprocess:
             self._validate_parameters_reprocess(parameters)
+        elif method == bulk_edit.run_workflow:
+            self._validate_parameters_run_workflow(parameters)
 
         return attrs
 
@@ -3086,7 +3077,7 @@ class BulkEditObjectsSerializer(SerializerWithPerms, SetPermissionsMixin):
             )
         return objects
 
-    def _validate_permissions(self, permissions) -> dict:
+    def _validate_permissions(self, permissions) -> PermissionsSpec:
         return self.validate_set_permissions(
             permissions,
         )

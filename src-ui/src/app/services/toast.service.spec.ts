@@ -1,5 +1,5 @@
 import { TestBed } from '@angular/core/testing'
-import { ToastService } from './toast.service'
+import { Toast, ToastLevel, ToastService } from './toast.service'
 
 describe('ToastService', () => {
   let toastService: ToastService
@@ -38,6 +38,29 @@ describe('ToastService', () => {
     })
   })
 
+  it('updates a notification by ID without duplicating or moving it', () => {
+    let notifications: Toast[] = []
+    toastService
+      .getToasts()
+      .subscribe((toasts) => (notifications = [...toasts]))
+    toastService.show({ id: 'task-1', content: 'Queued', delay: 5000 })
+    toastService.show({
+      id: 'other',
+      content: 'Another notification',
+      delay: 5000,
+    })
+    toastService.show({
+      id: 'task-1',
+      content: 'Completed',
+      delay: 5000,
+      level: ToastLevel.Success,
+    })
+    expect(notifications.map((toast) => toast.content)).toEqual([
+      'Another notification',
+      'Completed',
+    ])
+  })
+
   it('parses error string to object on show', () => {
     const toast = {
       title: 'Title',
@@ -66,6 +89,53 @@ describe('ToastService', () => {
         delay: 10000,
       })
     })
+  })
+
+  it('keeps showSuccess toasts out of the toast list', () => {
+    let toasts: Toast[] = []
+    const popups: Toast[] = []
+    toastService.getToasts().subscribe((t) => (toasts = [...t]))
+    toastService.showToast.subscribe((t) => popups.push(t))
+
+    toastService.showSuccess('Saved')
+
+    expect(popups.map((t) => t.content)).toEqual(['Saved'])
+    expect(toasts).toHaveLength(0)
+  })
+
+  it('keeps showInfo toasts out of the toast list', () => {
+    let toasts: Toast[] = []
+    const popups: Toast[] = []
+    toastService.getToasts().subscribe((t) => (toasts = [...t]))
+    toastService.showToast.subscribe((t) => popups.push(t))
+
+    toastService.showInfo('Info toast')
+    toastService.showError('Error toast')
+
+    expect(popups.map((t) => t.content)).toEqual(['Info toast', 'Error toast'])
+    expect(toasts.map((t) => t.content)).toEqual(['Error toast'])
+  })
+
+  it('adds toasts to the list unless persistent is false', () => {
+    let toasts: Toast[] = []
+    toastService.getToasts().subscribe((t) => (toasts = [...t]))
+
+    toastService.show({ content: 'kept', delay: 5000 })
+    toastService.show({ content: 'kept too', delay: 5000, persistent: true })
+    toastService.show({ content: 'popup only', delay: 5000, persistent: false })
+
+    expect(toasts.map((t) => t.content)).toEqual(['kept too', 'kept'])
+  })
+
+  it('still pops up non-persistent toasts while popups are suppressed', () => {
+    const popups: Toast[] = []
+    toastService.suppressPopupToasts = true
+    toastService.showToast.subscribe((t) => popups.push(t))
+
+    toastService.show({ content: 'kept', delay: 5000 })
+    toastService.showInfo('popup only')
+
+    expect(popups.map((t) => t?.content)).toEqual(['popup only'])
   })
 
   it('removes toast on close', () => {
@@ -105,5 +175,47 @@ describe('ToastService', () => {
 
     toastService.suppressPopupToasts = true
     toastService.showInfo('Info toast')
+  })
+
+  it('sets the level for showSuccess, showInfo and showError', () => {
+    const shown: Toast[] = []
+    toastService.showToast.subscribe((t) => shown.push(t))
+    toastService.showSuccess('Saved')
+    toastService.showInfo('Started')
+    toastService.showError('Failed')
+    expect(shown.map((t) => t.level)).toEqual([
+      ToastLevel.Success,
+      undefined,
+      ToastLevel.Error,
+    ])
+  })
+
+  it('adds silent toasts to the list without a popup', () => {
+    let toasts: Toast[] = []
+    const popups: Toast[] = []
+    toastService.getToasts().subscribe((t) => (toasts = [...t]))
+    toastService.showToast.subscribe((t) => popups.push(t))
+
+    toastService.show({ content: 'Recorded', delay: 5000, silent: true })
+
+    expect(toasts.map((t) => t.content)).toEqual(['Recorded'])
+    expect(popups).toHaveLength(0)
+  })
+
+  it('timestamps toasts and tracks read state', () => {
+    let toasts: Toast[] = []
+    toastService.getToasts().subscribe((t) => (toasts = [...t]))
+
+    toastService.showError('Failed')
+    expect(toasts[0].timestamp).toBeInstanceOf(Date)
+    expect(toasts[0].read).toBe(false)
+
+    toastService.markAllRead()
+    expect(toasts[0].read).toBe(true)
+
+    // arriving while the dropdown is open counts as seen
+    toastService.suppressPopupToasts = true
+    toastService.showError('Failed again')
+    expect(toasts[0].read).toBe(true)
   })
 })

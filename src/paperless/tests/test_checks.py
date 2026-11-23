@@ -1,4 +1,5 @@
 import os
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from unittest import mock
@@ -25,9 +26,30 @@ class TestChecks:
     def test_binaries(self) -> None:
         assert binaries_check(None) == []
 
-    def test_binaries_fail(self, settings: Settings) -> None:
-        settings.CONVERT_BINARY = "uuuhh"
-        assert len(binaries_check(None)) == 1
+    def test_binaries_fail(self, mocker: MockerFixture) -> None:
+        """
+        GIVEN:
+            - None of tesseract, ghostscript, pdftoppm or pdfinfo can be found
+        WHEN:
+            - The binaries check runs
+        THEN:
+            - One warning is raised per missing binary
+        """
+        mocker.patch("paperless.checks.shutil.which", return_value=None)
+        assert len(binaries_check(None)) == 4
+
+    @pytest.mark.parametrize("binary", ["pdftoppm", "pdfinfo"])
+    def test_binaries_fail_poppler(self, mocker: MockerFixture, binary: str) -> None:
+        real_which = shutil.which
+        mocker.patch(
+            "paperless.checks.shutil.which",
+            side_effect=lambda name: None if name == binary else real_which(name),
+        )
+
+        msgs = binaries_check(None)
+
+        assert len(msgs) == 1
+        assert binary in msgs[0].msg
 
     @pytest.mark.usefixtures("paperless_dirs")
     def test_paths_check(self) -> None:
@@ -211,14 +233,14 @@ class TestAuditLogChecks:
         assert "auditlog table was found but audit log is disabled." in msgs[0].msg
 
 
-DEPRECATED_VARS: dict[str, str] = {
-    "PAPERLESS_DB_TIMEOUT": "timeout",
-    "PAPERLESS_DB_POOLSIZE": "pool.min_size / pool.max_size",
-    "PAPERLESS_DBSSLMODE": "sslmode",
-    "PAPERLESS_DBSSLROOTCERT": "sslrootcert",
-    "PAPERLESS_DBSSLCERT": "sslcert",
-    "PAPERLESS_DBSSLKEY": "sslkey",
-}
+DEPRECATED_VARS = (
+    "PAPERLESS_DB_TIMEOUT",
+    "PAPERLESS_DB_POOLSIZE",
+    "PAPERLESS_DBSSLMODE",
+    "PAPERLESS_DBSSLROOTCERT",
+    "PAPERLESS_DBSSLCERT",
+    "PAPERLESS_DBSSLKEY",
+)
 
 
 class TestDeprecatedDbSettings:
@@ -234,26 +256,11 @@ class TestDeprecatedDbSettings:
         result = check_deprecated_db_settings(None)
         assert result == []
 
-    @pytest.mark.parametrize(
-        ("env_var", "db_option_key"),
-        [
-            pytest.param("PAPERLESS_DB_TIMEOUT", "timeout", id="db-timeout"),
-            pytest.param(
-                "PAPERLESS_DB_POOLSIZE",
-                "pool.min_size / pool.max_size",
-                id="db-poolsize",
-            ),
-            pytest.param("PAPERLESS_DBSSLMODE", "sslmode", id="ssl-mode"),
-            pytest.param("PAPERLESS_DBSSLROOTCERT", "sslrootcert", id="ssl-rootcert"),
-            pytest.param("PAPERLESS_DBSSLCERT", "sslcert", id="ssl-cert"),
-            pytest.param("PAPERLESS_DBSSLKEY", "sslkey", id="ssl-key"),
-        ],
-    )
+    @pytest.mark.parametrize("env_var", DEPRECATED_VARS)
     def test_single_deprecated_var_produces_one_warning(
         self,
         mocker: MockerFixture,
         env_var: str,
-        db_option_key: str,
     ) -> None:
         """Each deprecated var in isolation produces exactly one warning."""
         mocker.patch.dict(os.environ, {env_var: "some_value"}, clear=True)
@@ -264,7 +271,8 @@ class TestDeprecatedDbSettings:
         assert isinstance(warning, Warning)
         assert warning.id == "paperless.W001"
         assert env_var in warning.hint
-        assert db_option_key in warning.hint
+        assert "PAPERLESS_DB_OPTIONS" in warning.hint
+        assert "https://docs.paperless-ngx.com/migration-v3/" in warning.hint
 
     def test_multiple_deprecated_vars_produce_one_warning_each(
         self,
